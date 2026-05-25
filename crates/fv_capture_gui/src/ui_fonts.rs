@@ -1,20 +1,61 @@
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use eframe::egui;
 
 const UI_FONT_NAME: &str = "M PLUS 1";
 const UI_FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/MPLUS1.ttf");
 
-pub fn install(ctx: &egui::Context) {
-    ctx.set_fonts(definitions());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiFontWeight {
+    Regular,
+    Medium,
+    Bold,
 }
 
-fn definitions() -> egui::FontDefinitions {
+impl UiFontWeight {
+    pub fn axis_value(self) -> f32 {
+        match self {
+            Self::Regular => 500.0,
+            Self::Medium => 650.0,
+            Self::Bold => 760.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiFontConfig {
+    pub weight: UiFontWeight,
+    pub custom_font_path: Option<PathBuf>,
+}
+
+impl Default for UiFontConfig {
+    fn default() -> Self {
+        Self {
+            weight: UiFontWeight::Medium,
+            custom_font_path: None,
+        }
+    }
+}
+
+pub fn install(ctx: &egui::Context, config: &UiFontConfig) -> Result<(), String> {
+    ctx.set_fonts(definitions(config)?);
+    Ok(())
+}
+
+fn definitions(config: &UiFontConfig) -> Result<egui::FontDefinitions, String> {
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        UI_FONT_NAME.to_owned(),
-        Arc::new(egui::FontData::from_static(UI_FONT_BYTES)),
-    );
+    let font_data = if let Some(path) = &config.custom_font_path {
+        egui::FontData::from_owned(read_font(path)?)
+    } else {
+        bundled_font_data(config.weight)
+    };
+
+    fonts
+        .font_data
+        .insert(UI_FONT_NAME.to_owned(), Arc::new(font_data));
 
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         if let Some(names) = fonts.families.get_mut(&family) {
@@ -23,18 +64,29 @@ fn definitions() -> egui::FontDefinitions {
         }
     }
 
-    fonts
+    Ok(fonts)
+}
+
+fn bundled_font_data(weight: UiFontWeight) -> egui::FontData {
+    egui::FontData::from_static(UI_FONT_BYTES).tweak(egui::FontTweak {
+        coords: egui::epaint::text::VariationCoords::new([(b"wght", weight.axis_value())]),
+        ..Default::default()
+    })
+}
+
+fn read_font(path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|error| format!("failed to read font: {}", error))
 }
 
 #[cfg(test)]
 mod tests {
     use ab_glyph::{Font, FontArc};
 
-    use super::{UI_FONT_BYTES, UI_FONT_NAME, definitions};
+    use super::{UI_FONT_BYTES, UI_FONT_NAME, UiFontConfig, definitions};
 
     #[test]
     fn bundled_ui_font_is_registered_first() {
-        let fonts = definitions();
+        let fonts = definitions(&UiFontConfig::default()).unwrap();
 
         assert!(fonts.font_data.contains_key(UI_FONT_NAME));
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {

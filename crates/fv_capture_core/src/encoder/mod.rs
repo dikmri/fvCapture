@@ -85,8 +85,10 @@ pub fn encode_png_sequence(
     let pattern = frame_dir.join("frame_%06d.png");
     let args = build_ffmpeg_args(&pattern, config, output_path);
     tracing::info!(?args, "starting ffmpeg encode");
-    let output = Command::new(ffmpeg_binary())
-        .args(&args)
+    let mut command = Command::new(ffmpeg_binary());
+    command.args(&args);
+    suppress_console_window(&mut command);
+    let output = command
         .output()
         .context("failed to start FFmpeg. The bundled binary was not found; set FVCAPTURE_FFMPEG to override")?;
 
@@ -167,6 +169,17 @@ pub fn build_ffmpeg_args(
     args.push(output_path.to_string_lossy().to_string());
     args
 }
+
+#[cfg(windows)]
+fn suppress_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn suppress_console_window(_command: &mut Command) {}
 
 fn video_filter(config: &EncoderConfig) -> Option<String> {
     match config.size {

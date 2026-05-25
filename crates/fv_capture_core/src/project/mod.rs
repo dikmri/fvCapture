@@ -16,6 +16,7 @@ use tempfile::TempDir;
 use crate::{
     CaptureConfig,
     capture::XcapCaptureBackend,
+    capture_origin,
     encoder::{EncoderConfig, encode_png_sequence},
     input::{InputBackend, InputEvent, PollingInputBackend},
     overlay::{OverlaySettings, OverlayTimeline, composite_frame},
@@ -171,9 +172,11 @@ pub fn record_blocking(
         input_events.push(event);
     }
 
+    let origin = capture_origin(&request.capture.selection).unwrap_or((0.0, 0.0));
     let encoded_frames = compose_frames(
         &frames,
         &input_events,
+        origin,
         &request.overlay,
         &request.encoder,
         &composed_dir,
@@ -197,11 +200,13 @@ pub fn record_blocking(
 fn compose_frames(
     frames: &[FrameRecord],
     input_events: &[InputEvent],
+    capture_origin: (f64, f64),
     overlay: &OverlaySettings,
     encoder: &EncoderConfig,
     output_dir: &Path,
 ) -> Result<usize> {
-    let timeline = OverlayTimeline::from_input_events(input_events, overlay);
+    let local_input_events = localize_input_events(input_events, capture_origin);
+    let timeline = OverlayTimeline::from_input_events(&local_input_events, overlay);
     let trim_start = encoder.trim_start_ms;
     let trim_end = encoder.trim_end_ms.unwrap_or(u64::MAX);
     let mut output_index = 0usize;
@@ -231,4 +236,24 @@ fn compose_frames(
     }
 
     Ok(output_index)
+}
+
+fn localize_input_events(input_events: &[InputEvent], origin: (f64, f64)) -> Vec<InputEvent> {
+    let (origin_x, origin_y) = origin;
+    input_events
+        .iter()
+        .map(|event| {
+            let kind = match event.kind {
+                crate::InputEventKind::MouseMove { x, y } => crate::InputEventKind::MouseMove {
+                    x: x - origin_x,
+                    y: y - origin_y,
+                },
+                ref kind => kind.clone(),
+            };
+            InputEvent {
+                timestamp_ms: event.timestamp_ms,
+                kind,
+            }
+        })
+        .collect()
 }

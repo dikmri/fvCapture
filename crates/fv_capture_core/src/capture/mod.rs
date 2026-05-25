@@ -3,12 +3,15 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
-use xcap::Monitor;
+use xcap::{Monitor, Window};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CaptureSelection {
     PrimaryMonitor,
     Monitor {
+        id: u32,
+    },
+    Window {
         id: u32,
     },
     Region {
@@ -62,6 +65,19 @@ pub struct CaptureSource {
     pub is_primary: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureWindowSource {
+    pub id: u32,
+    pub app_name: String,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_minimized: bool,
+    pub is_focused: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct CapturedFrame {
     pub timestamp_ms: u64,
@@ -70,6 +86,7 @@ pub struct CapturedFrame {
 
 pub trait CaptureBackend {
     fn list_sources(&self) -> Result<Vec<CaptureSource>>;
+    fn list_windows(&self) -> Result<Vec<CaptureWindowSource>>;
     fn start_capture(&mut self, config: CaptureConfig) -> Result<()>;
     fn next_frame(&mut self) -> Result<CapturedFrame>;
     fn stop_capture(&mut self) -> Result<()>;
@@ -86,6 +103,9 @@ impl XcapCaptureBackend {
         config.validate()?;
         let monitor = selected_monitor(&config.selection)?;
         let image = match &config.selection {
+            CaptureSelection::Window { id } => selected_window(*id)?
+                .capture_image()
+                .context("failed to capture window image")?,
             CaptureSelection::Region {
                 x,
                 y,
@@ -114,6 +134,15 @@ impl CaptureBackend for XcapCaptureBackend {
             .into_iter()
             .map(source_from_monitor)
             .collect::<Result<Vec<_>>>()
+    }
+
+    fn list_windows(&self) -> Result<Vec<CaptureWindowSource>> {
+        let current_pid = std::process::id();
+        Window::all()
+            .context("failed to enumerate windows")?
+            .into_iter()
+            .filter_map(|window| source_from_window(window, current_pid).transpose())
+            .collect()
     }
 
     fn start_capture(&mut self, config: CaptureConfig) -> Result<()> {
@@ -158,6 +187,9 @@ fn selected_monitor(selection: &CaptureSelection) -> Result<Monitor> {
             .into_iter()
             .find(|monitor| monitor.id().unwrap_or_default() == *id)
             .ok_or_else(|| anyhow!("monitor id {id} was not found")),
+        CaptureSelection::Window { id } => selected_window(*id)?
+            .current_monitor()
+            .context("failed to read selected window monitor"),
         CaptureSelection::Region { monitor_id, .. } => {
             if let Some(monitor_id) = monitor_id {
                 monitors
@@ -176,6 +208,14 @@ fn selected_monitor(selection: &CaptureSelection) -> Result<Monitor> {
     }
 }
 
+fn selected_window(id: u32) -> Result<Window> {
+    Window::all()
+        .context("failed to enumerate windows")?
+        .into_iter()
+        .find(|window| window.id().unwrap_or_default() == id)
+        .ok_or_else(|| anyhow!("window id {id} was not found"))
+}
+
 fn source_from_monitor(monitor: Monitor) -> Result<CaptureSource> {
     let id = monitor.id().context("failed to read monitor id")?;
     let name = monitor
@@ -192,6 +232,68 @@ fn source_from_monitor(monitor: Monitor) -> Result<CaptureSource> {
         scale_factor: monitor.scale_factor().unwrap_or(1.0),
         is_primary: monitor.is_primary().unwrap_or(false),
     })
+}
+
+fn source_from_window(window: Window, current_pid: u32) -> Result<Option<CaptureWindowSource>> {
+    let id = window.id().context("failed to read window id")?;
+    let pid = window.pid().unwrap_or_default();
+    if pid == current_pid {
+        return Ok(None);
+    }
+
+    let title = window.title().unwrap_or_default();
+    let app_name = window.app_name().unwrap_or_default();
+    let width = window.width().unwrap_or_default();
+    let height = window.height().unwrap_or_default();
+    if width == 0 || height == 0 || (title.trim().is_empty() && app_name.trim().is_empty()) {
+        return Ok(None);
+    }
+
+    Ok(Some(CaptureWindowSource {
+        id,
+        app_name,
+        title,
+        x: window.x().unwrap_or_default(),
+        y: window.y().unwrap_or_default(),
+        width,
+        height,
+        is_minimized: window.is_minimized().unwrap_or(false),
+        is_focused: window.is_focused().unwrap_or(false),
+    }))
+}
+
+pub fn capture_origin(selection: &CaptureSelection) -> Result<(f64, f64)> {
+    match selection {
+        CaptureSelection::PrimaryMonitor | CaptureSelection::Monitor { .. } => {
+            let monitor = selected_monitor(selection)?;
+            Ok((
+                monitor.x().unwrap_or_default() as f64,
+                monitor.y().unwrap_or_default() as f64,
+            ))
+        }
+        CaptureSelection::Region {
+            monitor_id, x, y, ..
+        } => {
+            let monitor = selected_monitor(&CaptureSelection::Region {
+                monitor_id: *monitor_id,
+                x: *x,
+                y: *y,
+                width: 1,
+                height: 1,
+            })?;
+            Ok((
+                monitor.x().unwrap_or_default() as f64 + *x as f64,
+                monitor.y().unwrap_or_default() as f64 + *y as f64,
+            ))
+        }
+        CaptureSelection::Window { id } => {
+            let window = selected_window(*id)?;
+            Ok((
+                window.x().unwrap_or_default() as f64,
+                window.y().unwrap_or_default() as f64,
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

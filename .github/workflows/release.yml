@@ -120,8 +120,20 @@ jobs:
           name: ${{ matrix.package }}
           path: dist/*
 
+      - name: Prepare release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $notes = "docs/releases/${{ github.ref_name }}.md"
+          if (Test-Path $notes) {
+            Copy-Item $notes release-notes.md
+          } else {
+            Set-Content -Path release-notes.md -Value "# ${{ github.ref_name }}`n`n- リリースしました。"
+          }
+
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: release-notes.md

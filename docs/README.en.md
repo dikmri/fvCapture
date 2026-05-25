@@ -20,9 +20,11 @@ Download the archive for your OS from GitHub Releases.
 GUI:
 
 1. Choose full screen, monitor, or area from `Capture Source`.
-2. Toggle keyboard and mouse labels in `Overlay`.
-3. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`.
-4. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording.
+2. For area capture, drag on the preview to select the capture region. Window capture is also available.
+3. In `Overlay`, adjust keyboard, mouse, cursor, label position, colors, and display duration.
+4. Use `Preview` to check the label appearance before recording.
+5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`.
+6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. F9 starts/stops recording and F10 pauses/resumes.
 
 CLI:
 

@@ -41,14 +41,43 @@ pub enum LabelPosition {
     TopCenter,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OverlayLabelFont {
+    Compact,
+    Regular,
+    Bold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl OverlayColor {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OverlaySettings {
     pub show_keyboard: bool,
     pub show_mouse: bool,
+    pub show_cursor: bool,
     pub label_scale: f32,
+    pub label_font: OverlayLabelFont,
     pub label_position: LabelPosition,
     pub display_ms: u64,
     pub opacity: f32,
+    pub keyboard_background: OverlayColor,
+    pub keyboard_text: OverlayColor,
+    pub keyboard_border: OverlayColor,
+    pub mouse_primary: OverlayColor,
+    pub mouse_secondary: OverlayColor,
+    pub cursor_color: OverlayColor,
 }
 
 impl Default for OverlaySettings {
@@ -56,10 +85,18 @@ impl Default for OverlaySettings {
         Self {
             show_keyboard: true,
             show_mouse: true,
+            show_cursor: false,
             label_scale: 1.0,
+            label_font: OverlayLabelFont::Bold,
             label_position: LabelPosition::BottomCenter,
             display_ms: 1_200,
             opacity: 0.92,
+            keyboard_background: OverlayColor::new(15, 20, 26),
+            keyboard_text: OverlayColor::new(246, 250, 255),
+            keyboard_border: OverlayColor::new(235, 241, 247),
+            mouse_primary: OverlayColor::new(57, 255, 210),
+            mouse_secondary: OverlayColor::new(255, 255, 255),
+            cursor_color: OverlayColor::new(255, 245, 140),
         }
     }
 }
@@ -67,6 +104,7 @@ impl Default for OverlaySettings {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OverlayTimeline {
     pub events: Vec<OverlayEvent>,
+    pub mouse_positions: Vec<(u64, Point)>,
 }
 
 impl OverlayTimeline {
@@ -79,6 +117,7 @@ impl OverlayTimeline {
         let mut last_mouse_position = Point { x: 0.0, y: 0.0 };
         let mut last_click: Option<(MouseButton, u64, Point)> = None;
         let mut events = Vec::new();
+        let mut mouse_positions = Vec::new();
 
         for event in sorted {
             match event.kind {
@@ -102,6 +141,7 @@ impl OverlayTimeline {
                 }
                 InputEventKind::MouseMove { x, y } => {
                     last_mouse_position = Point { x, y };
+                    mouse_positions.push((event.timestamp_ms, last_mouse_position));
                 }
                 InputEventKind::MouseDown(button) => {
                     mouse_down.insert(button, (event.timestamp_ms, last_mouse_position));
@@ -176,7 +216,10 @@ impl OverlayTimeline {
             }
         }
 
-        Self { events }
+        Self {
+            events,
+            mouse_positions,
+        }
     }
 
     pub fn active_events(&self, timestamp_ms: u64) -> impl Iterator<Item = &OverlayEvent> {
@@ -184,6 +227,14 @@ impl OverlayTimeline {
             timestamp_ms >= event.start_ms
                 && timestamp_ms <= event.start_ms.saturating_add(event.duration_ms)
         })
+    }
+
+    pub fn mouse_position_at(&self, timestamp_ms: u64) -> Option<Point> {
+        self.mouse_positions
+            .iter()
+            .rev()
+            .find(|(position_ms, _)| *position_ms <= timestamp_ms)
+            .map(|(_, point)| *point)
     }
 }
 
@@ -210,7 +261,7 @@ pub fn composite_frame(
                         start.y as i32,
                         end.x as i32,
                         end.y as i32,
-                        rgba(57, 255, 210, 200, settings.opacity),
+                        rgba(settings.mouse_primary, 200, settings.opacity),
                         3,
                     );
                 }
@@ -228,6 +279,12 @@ pub fn composite_frame(
         });
     if let Some(keys) = last_combo {
         draw_key_combo(frame, keys, settings);
+    }
+
+    if settings.show_cursor
+        && let Some(point) = timeline.mouse_position_at(timestamp_ms)
+    {
+        draw_cursor(frame, point.x as i32, point.y as i32, settings);
     }
 }
 
@@ -256,7 +313,7 @@ fn draw_key_combo(frame: &mut RgbaImage, keys: &[KeyCode], settings: &OverlaySet
     let key_height = 18 * scale;
     let widths: Vec<i32> = labels
         .iter()
-        .map(|label| text_width(label, scale) + padding_x * 2)
+        .map(|label| text_width(label, scale, settings.label_font) + padding_x * 2)
         .collect();
     let total_width = widths.iter().sum::<i32>() + gap * (widths.len().saturating_sub(1) as i32);
     let frame_width = frame.width() as i32;
@@ -275,7 +332,7 @@ fn draw_key_combo(frame: &mut RgbaImage, keys: &[KeyCode], settings: &OverlaySet
             y,
             width,
             key_height,
-            rgba(15, 20, 26, 218, settings.opacity),
+            rgba(settings.keyboard_background, 218, settings.opacity),
         );
         draw_rect(
             frame,
@@ -283,7 +340,7 @@ fn draw_key_combo(frame: &mut RgbaImage, keys: &[KeyCode], settings: &OverlaySet
             y,
             width,
             key_height,
-            rgba(235, 241, 247, 190, settings.opacity),
+            rgba(settings.keyboard_border, 190, settings.opacity),
             2,
         );
         let text_x = x + padding_x;
@@ -294,7 +351,8 @@ fn draw_key_combo(frame: &mut RgbaImage, keys: &[KeyCode], settings: &OverlaySet
             text_y,
             label,
             scale,
-            rgba(246, 250, 255, 255, settings.opacity),
+            rgba(settings.keyboard_text, 255, settings.opacity),
+            settings.label_font,
         );
         x += width + gap;
     }
@@ -321,7 +379,7 @@ fn draw_click_ring(
         x,
         y,
         radius as i32,
-        rgba(57, 255, 210, alpha, settings.opacity),
+        rgba(settings.mouse_primary, alpha, settings.opacity),
         3,
     );
     draw_circle_outline(
@@ -329,20 +387,46 @@ fn draw_click_ring(
         x,
         y,
         (radius * 0.55) as i32,
-        rgba(255, 255, 255, alpha.saturating_sub(50), settings.opacity),
+        rgba(
+            settings.mouse_secondary,
+            alpha.saturating_sub(50),
+            settings.opacity,
+        ),
         2,
     );
 }
 
-fn text_width(text: &str, scale: i32) -> i32 {
+fn text_width(text: &str, scale: i32, font: OverlayLabelFont) -> i32 {
+    let advance = match font {
+        OverlayLabelFont::Compact => 7,
+        OverlayLabelFont::Regular => 8,
+        OverlayLabelFont::Bold => 9,
+    };
     let count = text.chars().count() as i32;
-    if count == 0 { 0 } else { count * 8 * scale }
+    if count == 0 {
+        0
+    } else {
+        count * advance * scale
+    }
 }
 
-fn draw_text(frame: &mut RgbaImage, x: i32, y: i32, text: &str, scale: i32, color: Rgba<u8>) {
+fn draw_text(
+    frame: &mut RgbaImage,
+    x: i32,
+    y: i32,
+    text: &str,
+    scale: i32,
+    color: Rgba<u8>,
+    font: OverlayLabelFont,
+) {
     use font8x8::UnicodeFonts;
 
     let mut cursor_x = x;
+    let advance = match font {
+        OverlayLabelFont::Compact => 7,
+        OverlayLabelFont::Regular => 8,
+        OverlayLabelFont::Bold => 9,
+    } * scale;
     for ch in text.to_ascii_uppercase().chars() {
         if let Some(glyph) = font8x8::BASIC_FONTS.get(ch) {
             for (row, byte) in glyph.iter().enumerate() {
@@ -356,16 +440,38 @@ fn draw_text(frame: &mut RgbaImage, x: i32, y: i32, text: &str, scale: i32, colo
                             scale,
                             color,
                         );
+                        if font == OverlayLabelFont::Bold {
+                            fill_rect(
+                                frame,
+                                cursor_x + col * scale + scale,
+                                y + row as i32 * scale,
+                                scale,
+                                scale,
+                                color,
+                            );
+                        }
                     }
                 }
             }
         }
-        cursor_x += 8 * scale;
+        cursor_x += advance;
     }
 }
 
-fn rgba(r: u8, g: u8, b: u8, a: u8, opacity: f32) -> Rgba<u8> {
-    Rgba([r, g, b, ((a as f32) * opacity.clamp(0.0, 1.0)) as u8])
+fn draw_cursor(frame: &mut RgbaImage, x: i32, y: i32, settings: &OverlaySettings) {
+    let color = rgba(settings.cursor_color, 235, settings.opacity);
+    draw_line(frame, x, y, x + 14, y + 22, color, 3);
+    draw_line(frame, x + 14, y + 22, x + 2, y + 18, color, 3);
+    draw_line(frame, x + 2, y + 18, x, y, color, 3);
+}
+
+fn rgba(color: OverlayColor, a: u8, opacity: f32) -> Rgba<u8> {
+    Rgba([
+        color.r,
+        color.g,
+        color.b,
+        ((a as f32) * opacity.clamp(0.0, 1.0)) as u8,
+    ])
 }
 
 fn fill_rect(frame: &mut RgbaImage, x: i32, y: i32, width: i32, height: i32, color: Rgba<u8>) {
@@ -541,9 +647,31 @@ mod tests {
                 duration_ms: 1_000,
                 kind: OverlayEventKind::KeyCombo(vec![KeyCode::Control, KeyCode::Character('S')]),
             }],
+            mouse_positions: Vec::new(),
         };
 
         composite_frame(&mut frame, &timeline, 100, &OverlaySettings::default());
+
+        assert!(
+            frame
+                .pixels()
+                .any(|pixel| pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0)
+        );
+    }
+
+    #[test]
+    fn renderer_modifies_pixels_for_cursor() {
+        let mut frame = RgbaImage::from_pixel(160, 120, Rgba([0, 0, 0, 255]));
+        let timeline = OverlayTimeline {
+            events: Vec::new(),
+            mouse_positions: vec![(0, Point { x: 20.0, y: 20.0 })],
+        };
+        let settings = OverlaySettings {
+            show_cursor: true,
+            ..Default::default()
+        };
+
+        composite_frame(&mut frame, &timeline, 100, &settings);
 
         assert!(
             frame
