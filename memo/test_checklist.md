@@ -18,4 +18,5 @@
 - [x] Windows release GUI 実行ファイルの PE Subsystem が Windows GUI であることを検査する
 - [x] GUI を起動して日本語UIが四角表示にならないことを確認する
 - [x] ローカル release 相当アーカイブに FFmpeg とフォントライセンスが含まれることを確認する
-- [ ] v0.2.1 GitHub Actions release を実行し、Windows/macOS/Linux成果物を確認する
+- [x] v0.2.1 GitHub Actions release を実行し、Windows/macOS/Linux成果物を確認する
+- [x] v0.2.1 Windows リリースアーカイブを展開し、GUI subsystem と同梱物を確認する
