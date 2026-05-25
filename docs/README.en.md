@@ -4,14 +4,28 @@ fvCapture is a desktop screen capture app that records the screen and overlays k
 
 ### Download
 
-Download the archive for your OS from GitHub Releases.
+The latest release archives are available from GitHub Releases.
 
 <https://github.com/dikmri/fvCapture/releases>
 
+To install from a command, use one of the following commands. It downloads and extracts the latest release automatically.
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/dikmri/fvCapture/main/scripts/install.ps1 | iex"
+```
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dikmri/fvCapture/main/scripts/install.sh | sh
+```
+
 ### Installation
 
-1. Download the archive for your OS from Releases.
-2. Extract it to any folder.
+1. Command installation places the app in `%LOCALAPPDATA%\fvCapture` on Windows and `~/.local/share/fvCapture` on macOS / Linux.
+2. For manual installation, download the archive for your OS from Releases and extract it to any folder.
 3. Launch `fvCapture` for the GUI or `fv-capture` for the CLI.
 4. FFmpeg is bundled. Set `FVCAPTURE_FFMPEG` only when you want to use a different FFmpeg executable.
 

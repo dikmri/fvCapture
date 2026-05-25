@@ -27,4 +27,8 @@
 - [x] `cargo build --workspace --release`
 - [x] GUIを起動してウィンドウ選択、操作ラベルプレビュー、フォント設定が描画されることを確認する
 - [x] PATHなしの同梱FFmpeg録画を再検証する
-- [ ] v0.3.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する
+- [x] v0.3.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する
+- [x] v0.3.0 Windows リリースアーカイブを展開し、GUI subsystem と同梱物を確認する
+- [x] `python scripts/build_readme.py --check`
+- [x] Windows コマンドインストールスクリプトを一時フォルダに実行し、GUI/CLI/同梱FFmpeg/shimの展開を確認する
+- [x] `bash -n scripts/install.sh`
