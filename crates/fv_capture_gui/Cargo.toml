@@ -20,3 +20,6 @@ rfd = "0.15.4"
 sys-locale = "0.3.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+
+[dev-dependencies]
+ab_glyph = "0.2.32"

@@ -14,3 +14,8 @@
 - [x] 生成ファイルを `ffprobe` で検査する
 - [x] v0.2.0 リリースビルド後に PATH なしの同梱 FFmpeg 録画を再検証する
 - [x] 生成 MP4 を同梱 `ffmpeg` でデコード検査する
+- [x] 日本語フォント登録の単体テストを実行する
+- [x] Windows release GUI 実行ファイルの PE Subsystem が Windows GUI であることを検査する
+- [x] GUI を起動して日本語UIが四角表示にならないことを確認する
+- [x] ローカル release 相当アーカイブに FFmpeg とフォントライセンスが含まれることを確認する
+- [ ] v0.2.1 GitHub Actions release を実行し、Windows/macOS/Linux成果物を確認する

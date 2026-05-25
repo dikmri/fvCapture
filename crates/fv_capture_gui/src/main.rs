@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -8,6 +10,7 @@ use fv_capture_core::{
 };
 
 mod i18n;
+mod ui_fonts;
 
 use i18n::{LanguageChoice, Text, Tr};
 
@@ -28,7 +31,10 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "fvCapture",
         options,
-        Box::new(|_cc| Ok(Box::new(FvCaptureApp::new()))),
+        Box::new(|cc| {
+            ui_fonts::install(&cc.egui_ctx);
+            Ok(Box::new(FvCaptureApp::new()))
+        }),
     )
 }
 

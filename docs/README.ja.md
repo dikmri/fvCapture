@@ -39,4 +39,4 @@ fv-capture --list-sources
 
 fvCapture 本体は MIT License です。
 
-リリースアーカイブにはユーザーの負担を減らすため FFmpeg バイナリを同梱しています。FFmpeg は fvCapture とは別ライセンスで配布されます。詳細は `THIRD_PARTY_NOTICES.md` と、アーカイブ内の `third_party/ffmpeg/` を確認してください。
+リリースアーカイブにはユーザーの負担を減らすため FFmpeg バイナリを同梱し、GUI表示用フォントをアプリに埋め込んでいます。これらは fvCapture とは別ライセンスで配布されます。詳細は `THIRD_PARTY_NOTICES.md` と、アーカイブ内の `third_party/` を確認してください。

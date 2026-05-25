@@ -18,3 +18,6 @@
 - [x] 同梱 FFmpeg を PATH なしで優先利用できる
 - [x] GUI と README が日本語/英語に対応している
 - [x] README 生成チェックで多言語READMEの同期漏れを検出できる
+- [x] Windows release の GUI 実行ファイルが console subsystem ではなく GUI subsystem になっている
+- [x] GUI に日本語対応フォントを登録し、日本語テキストが豆腐にならない構成になっている
+- [x] 同梱フォントのライセンス文をリリースアーカイブへ含める設定になっている
