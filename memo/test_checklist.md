@@ -57,4 +57,4 @@
 - [x] グローバル F9/F10 の登録状態を確認する
 - [x] release ビルドの GUI 実行ファイルが Windows GUI subsystem であることを確認する
 - [x] release ビルドの GUI 実行ファイルにアプリアイコンリソースが含まれることを確認する
-- [ ] v0.5.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する
+- [x] v0.5.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する
