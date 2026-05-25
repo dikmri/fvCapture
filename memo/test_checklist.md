@@ -44,3 +44,17 @@
 - [x] release ビルドの GUI を起動し、プロセスが正常に立ち上がることを確認する
 - [x] v0.4.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する
 - [x] v0.4.0 Windows リリースアーカイブを展開し、GUI subsystem、同梱FFmpeg、同梱インストールスクリプトを確認する
+
+## v0.5.0 テスト
+
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo test --workspace`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo build --workspace --release`
+- [x] `python scripts/build_readme.py --check`
+- [x] release CLI で1秒 MP4 録画を実行する
+- [x] GUI を起動してタブ構成、実画面範囲選択、ウィンドウプレビュー、画面上ラベルプレビュー、保存先操作を確認する
+- [x] グローバル F9/F10 の登録状態を確認する
+- [x] release ビルドの GUI 実行ファイルが Windows GUI subsystem であることを確認する
+- [x] release ビルドの GUI 実行ファイルにアプリアイコンリソースが含まれることを確認する
+- [ ] v0.5.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する

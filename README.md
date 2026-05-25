@@ -39,12 +39,12 @@ curl -fsSL https://raw.githubusercontent.com/dikmri/fvCapture/main/scripts/insta
 
 GUI:
 
-1. `録画範囲` で全画面、モニター、範囲を選びます。
-2. 範囲指定ではプレビュー上をドラッグして録画範囲を選べます。ウィンドウ単位の録画も選択できます。
+1. `録画範囲` で全画面、モニター、ウィンドウ、範囲を選びます。ウィンドウ録画では選択中ウィンドウのプレビューも確認できます。
+2. 範囲指定では `画面上で範囲選択` から実際の画面上をドラッグして録画範囲を選べます。
 3. `操作ラベル` でキーボード/マウス/カーソル表示、ラベル位置、色、表示時間を調整します。
-4. `プレビュー` でラベルの見た目を確認します。
-5. `出力` で MP4 / GIF / WebM、FPS、サイズ、保存先を選びます。
-6. `録画開始` で録画開始、`一時停止` / `再開`、`停止` で保存します。F9で録画開始/停止、F10で一時停止/再開できます。
+4. `プレビュー` でラベルの見た目を確認します。`画面上でプレビュー` では実際の画面上に重ねた状態を確認できます。
+5. `出力` で MP4 / GIF / WebM、FPS、サイズ、保存先を選びます。保存先フォルダの指定と、保存先フォルダを開く操作もできます。
+6. `録画開始` で録画開始、`一時停止` / `再開`、`停止` で保存します。アプリ起動中は、fvCapture が非アクティブでも F9 で録画開始/停止、F10 で一時停止/再開できます。
 7. 起動時にアップデートが見つかった場合は、確認ダイアログから更新できます。
 
 CLI:
@@ -102,12 +102,12 @@ curl -fsSL https://raw.githubusercontent.com/dikmri/fvCapture/main/scripts/insta
 
 GUI:
 
-1. Choose full screen, monitor, or area from `Capture Source`.
-2. For area capture, drag on the preview to select the capture region. Window capture is also available.
+1. Choose full screen, monitor, window, or area from `Capture Source`. Window capture shows a preview of the selected window.
+2. For area capture, use `Select on screen` and drag on the actual screen to select the capture region.
 3. In `Overlay`, adjust keyboard, mouse, cursor, label position, colors, and display duration.
-4. Use `Preview` to check the label appearance before recording.
-5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`.
-6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. F9 starts/stops recording and F10 pauses/resumes.
+4. Use `Preview` to check the label appearance before recording. `Preview on screen` shows the labels over the actual screen.
+5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`. You can also choose and open the output folder.
+6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. While the app is running, F9 starts/stops recording and F10 pauses/resumes even when fvCapture is not active.
 7. If an update is found at startup, confirm the update dialog to install it.
 
 CLI:

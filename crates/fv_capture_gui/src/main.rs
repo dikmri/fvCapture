@@ -1,7 +1,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     sync::mpsc::{self, Receiver},
     thread,
     time::{Duration, Instant},
@@ -9,10 +10,16 @@ use std::{
 
 use eframe::egui;
 use fv_capture_core::{
-    ActiveRecording, AppConfig, CaptureBackend, CaptureSelection, CaptureSource,
-    CaptureWindowSource, LabelPosition, OutputFormat, OutputSize, OverlayColor, OverlayLabelFont,
-    RecordingRequest, RecordingSummary, XcapCaptureBackend,
+    ActiveRecording, AppConfig, CaptureBackend, CaptureConfig, CaptureSelection, CaptureSource,
+    CaptureWindowSource, KeyCode, LabelPosition, MouseButton, OutputFormat, OutputSize,
+    OverlayColor, OverlayEvent, OverlayEventKind, OverlayLabelFont, OverlayTimeline, Point,
+    RecordingRequest, RecordingSummary, XcapCaptureBackend, capture_origin, composite_frame,
 };
+use global_hotkey::{
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
+    hotkey::{Code, HotKey},
+};
+use image::RgbaImage;
 
 mod auto_update;
 mod i18n;
@@ -27,10 +34,15 @@ fn main() -> eframe::Result {
         )
         .init();
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([820.0, 680.0])
+        .with_min_inner_size([760.0, 620.0]);
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 650.0])
-            .with_min_inner_size([440.0, 560.0]),
+        viewport,
         ..Default::default()
     };
 
@@ -52,8 +64,82 @@ enum SourceMode {
     Region,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppTab {
+    Capture,
+    Overlay,
+    Output,
+    Appearance,
+}
+
+struct PreviewImage {
+    image: egui::ColorImage,
+    texture: Option<egui::TextureHandle>,
+    origin: (i32, i32),
+    source_size: (u32, u32),
+}
+
+impl PreviewImage {
+    fn new(image: RgbaImage, origin: (i32, i32)) -> Self {
+        let source_size = (image.width(), image.height());
+        Self {
+            image: rgba_image_to_color_image(&image),
+            texture: None,
+            origin,
+            source_size,
+        }
+    }
+
+    fn texture_id(&mut self, ctx: &egui::Context, name: &str) -> egui::TextureId {
+        self.texture
+            .get_or_insert_with(|| {
+                ctx.load_texture(name, self.image.clone(), egui::TextureOptions::LINEAR)
+            })
+            .id()
+    }
+}
+
+struct RegionSelectorState {
+    preview: PreviewImage,
+    drag_start: Option<(u32, u32)>,
+    selection: Option<(u32, u32, u32, u32)>,
+}
+
+struct ScreenOverlayPreviewState {
+    preview: PreviewImage,
+}
+
+struct GlobalShortcutState {
+    _manager: GlobalHotKeyManager,
+    start_stop_id: u32,
+    pause_resume_id: u32,
+}
+
+impl GlobalShortcutState {
+    fn register() -> Result<Self, String> {
+        let manager = GlobalHotKeyManager::new().map_err(|error| error.to_string())?;
+        let start_stop = HotKey::new(None, Code::F9);
+        let pause_resume = HotKey::new(None, Code::F10);
+        manager
+            .register_all(&[start_stop, pause_resume])
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            _manager: manager,
+            start_stop_id: start_stop.id(),
+            pause_resume_id: pause_resume.id(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutAction {
+    StartStop,
+    PauseResume,
+}
+
 struct FvCaptureApp {
     config: AppConfig,
+    active_tab: AppTab,
     sources: Vec<CaptureSource>,
     window_sources: Vec<CaptureWindowSource>,
     source_mode: SourceMode,
@@ -63,15 +149,21 @@ struct FvCaptureApp {
     region_y: u32,
     region_width: u32,
     region_height: u32,
-    region_drag_start: Option<(u32, u32)>,
     output_path: String,
     active: Option<ActiveRecording>,
     encoding_rx: Option<Receiver<Result<RecordingSummary, String>>>,
     encoding_started_at: Option<Instant>,
+    global_shortcuts: Option<GlobalShortcutState>,
+    global_shortcut_error: Option<String>,
     update_rx: Option<Receiver<Result<Option<auto_update::UpdateInfo>, String>>>,
     update_available: Option<auto_update::UpdateInfo>,
     update_error: Option<String>,
     update_installing: bool,
+    window_preview_for: Option<u32>,
+    window_preview: Option<PreviewImage>,
+    window_preview_error: Option<String>,
+    region_selector: Option<RegionSelectorState>,
+    screen_overlay_preview: Option<ScreenOverlayPreviewState>,
     last_summary: Option<RecordingSummary>,
     status: StatusKey,
     error: Option<String>,
@@ -91,8 +183,13 @@ enum StatusKey {
 
 impl FvCaptureApp {
     fn new() -> Self {
+        let (global_shortcuts, global_shortcut_error) = match GlobalShortcutState::register() {
+            Ok(shortcuts) => (Some(shortcuts), None),
+            Err(error) => (None, Some(error)),
+        };
         let mut app = Self {
             config: AppConfig::default(),
+            active_tab: AppTab::Capture,
             sources: Vec::new(),
             window_sources: Vec::new(),
             source_mode: SourceMode::Primary,
@@ -102,15 +199,21 @@ impl FvCaptureApp {
             region_y: 0,
             region_width: 1280,
             region_height: 720,
-            region_drag_start: None,
             output_path: default_output_path(OutputFormat::Mp4).display().to_string(),
             active: None,
             encoding_rx: None,
             encoding_started_at: None,
+            global_shortcuts,
+            global_shortcut_error,
             update_rx: Some(auto_update::spawn_update_check()),
             update_available: None,
             update_error: None,
             update_installing: false,
+            window_preview_for: None,
+            window_preview: None,
+            window_preview_error: None,
+            region_selector: None,
+            screen_overlay_preview: None,
             last_summary: None,
             status: StatusKey::Ready,
             error: None,
@@ -165,32 +268,41 @@ impl FvCaptureApp {
         }
     }
 
+    fn current_selection(&self) -> Result<CaptureSelection, String> {
+        match self.source_mode {
+            SourceMode::Primary => Ok(CaptureSelection::PrimaryMonitor),
+            SourceMode::Monitor => Ok(self
+                .selected_monitor_id
+                .map(|id| CaptureSelection::Monitor { id })
+                .unwrap_or(CaptureSelection::PrimaryMonitor)),
+            SourceMode::Window => {
+                let Some(id) = self.selected_window_id else {
+                    return Err(self.tr(Text::NoWindowSelected).to_string());
+                };
+                Ok(CaptureSelection::Window { id })
+            }
+            SourceMode::Region => Ok(CaptureSelection::Region {
+                monitor_id: self.selected_monitor_id,
+                x: self.region_x,
+                y: self.region_y,
+                width: self.region_width.max(1),
+                height: self.region_height.max(1),
+            }),
+        }
+    }
+
     fn start_recording(&mut self) {
         if self.active.is_some() || self.encoding_rx.is_some() {
             return;
         }
 
         let output_path = PathBuf::from(self.output_path.trim());
-        let selection = match self.source_mode {
-            SourceMode::Primary => CaptureSelection::PrimaryMonitor,
-            SourceMode::Monitor => self
-                .selected_monitor_id
-                .map(|id| CaptureSelection::Monitor { id })
-                .unwrap_or(CaptureSelection::PrimaryMonitor),
-            SourceMode::Window => {
-                let Some(id) = self.selected_window_id else {
-                    self.error = Some(self.tr(Text::NoWindowSelected).to_string());
-                    return;
-                };
-                CaptureSelection::Window { id }
+        let selection = match self.current_selection() {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.error = Some(error);
+                return;
             }
-            SourceMode::Region => CaptureSelection::Region {
-                monitor_id: self.selected_monitor_id,
-                x: self.region_x,
-                y: self.region_y,
-                width: self.region_width.max(1),
-                height: self.region_height.max(1),
-            },
         };
 
         self.config.capture.selection = selection;
@@ -272,24 +384,56 @@ impl FvCaptureApp {
         }
     }
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input(|input| input.key_pressed(egui::Key::F9)) {
-            if self.active.is_some() {
-                self.stop_recording();
-            } else if self.encoding_rx.is_none() {
-                self.start_recording();
+    fn poll_global_shortcuts(&mut self) {
+        let Some(shortcuts) = &self.global_shortcuts else {
+            return;
+        };
+        let start_stop_id = shortcuts.start_stop_id;
+        let pause_resume_id = shortcuts.pause_resume_id;
+        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if event.state != HotKeyState::Pressed {
+                continue;
+            }
+            if event.id == start_stop_id {
+                self.handle_shortcut_action(ShortcutAction::StartStop);
+            } else if event.id == pause_resume_id {
+                self.handle_shortcut_action(ShortcutAction::PauseResume);
             }
         }
+    }
 
-        if ctx.input(|input| input.key_pressed(egui::Key::F10))
-            && let Some(active) = &self.active
-        {
-            if active.is_paused() {
-                active.resume();
-                self.status = StatusKey::Recording;
-            } else {
-                active.pause();
-                self.status = StatusKey::Paused;
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.global_shortcuts.is_some() {
+            return;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::F9)) {
+            self.handle_shortcut_action(ShortcutAction::StartStop);
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::F10)) {
+            self.handle_shortcut_action(ShortcutAction::PauseResume);
+        }
+    }
+
+    fn handle_shortcut_action(&mut self, action: ShortcutAction) {
+        match action {
+            ShortcutAction::StartStop => {
+                if self.active.is_some() {
+                    self.stop_recording();
+                } else if self.encoding_rx.is_none() {
+                    self.start_recording();
+                }
+            }
+            ShortcutAction::PauseResume => {
+                if let Some(active) = &self.active {
+                    if active.is_paused() {
+                        active.resume();
+                        self.status = StatusKey::Recording;
+                    } else {
+                        active.pause();
+                        self.status = StatusKey::Paused;
+                    }
+                }
             }
         }
     }
@@ -300,6 +444,7 @@ impl eframe::App for FvCaptureApp {
         let ctx = ui.ctx().clone();
         self.poll_encoding();
         self.poll_update_check();
+        self.poll_global_shortcuts();
         self.handle_shortcuts(&ctx);
         if self.active.is_some() || self.encoding_rx.is_some() || self.update_rx.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -308,9 +453,11 @@ impl eframe::App for FvCaptureApp {
         egui::Frame::default()
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.content_ui(ui));
+                self.content_ui(ui);
             });
         self.update_dialog_ui(&ctx);
+        self.region_selector_viewport(&ctx);
+        self.screen_overlay_preview_viewport(&ctx);
     }
 }
 
@@ -349,6 +496,12 @@ impl FvCaptureApp {
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
         }
+        if let Some(error) = &self.global_shortcut_error {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 160, 70),
+                format!("{}: {error}", self.tr(Text::GlobalShortcutUnavailable)),
+            );
+        }
         if let Some(error) = &self.update_error {
             ui.colored_label(
                 egui::Color32::from_rgb(220, 80, 80),
@@ -369,19 +522,34 @@ impl FvCaptureApp {
         }
 
         ui.add_space(8.0);
-        self.source_ui(ui);
+        self.tab_bar_ui(ui);
         ui.separator();
-        self.overlay_ui(ui);
-        ui.separator();
-        self.output_ui(ui);
-        ui.separator();
-        self.app_appearance_ui(ui);
+        match self.active_tab {
+            AppTab::Capture => self.source_ui(ui),
+            AppTab::Overlay => self.overlay_ui(ui),
+            AppTab::Output => self.output_ui(ui),
+            AppTab::Appearance => self.app_appearance_ui(ui),
+        }
+        ui.add_space(8.0);
         ui.separator();
         self.action_ui(ui);
     }
 }
 
 impl FvCaptureApp {
+    fn tab_bar_ui(&mut self, ui: &mut egui::Ui) {
+        let capture = self.tr(Text::CaptureTab);
+        let overlay = self.tr(Text::OverlayTab);
+        let output = self.tr(Text::OutputTab);
+        let appearance = self.tr(Text::AppearanceTab);
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.active_tab, AppTab::Capture, capture);
+            ui.selectable_value(&mut self.active_tab, AppTab::Overlay, overlay);
+            ui.selectable_value(&mut self.active_tab, AppTab::Output, output);
+            ui.selectable_value(&mut self.active_tab, AppTab::Appearance, appearance);
+        });
+    }
+
     fn source_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.tr(Text::CaptureSource));
         let full_screen = self.tr(Text::FullScreen);
@@ -420,21 +588,42 @@ impl FvCaptureApp {
         }
 
         if self.source_mode == SourceMode::Window {
+            let mut changed_window = false;
             egui::ComboBox::from_label(window)
                 .selected_text(self.selected_window_label())
                 .show_ui(ui, |ui| {
                     for window in &self.window_sources {
-                        ui.selectable_value(
-                            &mut self.selected_window_id,
-                            Some(window.id),
-                            window_label(window),
-                        );
+                        changed_window |= ui
+                            .selectable_value(
+                                &mut self.selected_window_id,
+                                Some(window.id),
+                                window_label(window),
+                            )
+                            .changed();
                     }
                 });
+            if changed_window {
+                self.window_preview_for = None;
+            }
+            self.window_preview_ui(ui);
         }
 
         if self.source_mode == SourceMode::Region {
-            self.region_picker_ui(ui);
+            ui.horizontal(|ui| {
+                if ui.button(self.tr(Text::SelectOnScreen)).clicked() {
+                    self.open_region_selector();
+                }
+                ui.label(format!(
+                    "{}: {}, {}  {}: {}  {}: {}",
+                    self.tr(Text::Position),
+                    self.region_x,
+                    self.region_y,
+                    self.tr(Text::Width),
+                    self.region_width,
+                    self.tr(Text::Height),
+                    self.region_height
+                ));
+            });
         }
     }
 
@@ -527,6 +716,9 @@ impl FvCaptureApp {
                     &mut self.config.overlay.cursor_color,
                 );
             });
+        if ui.button(self.tr(Text::PreviewOnScreen)).clicked() {
+            self.open_screen_overlay_preview();
+        }
         self.overlay_preview_ui(ui);
     }
 
@@ -617,6 +809,16 @@ impl FvCaptureApp {
                 self.output_path = path.display().to_string();
             }
         });
+        ui.horizontal(|ui| {
+            if ui.button(self.tr(Text::ChooseOutputFolder)).clicked() {
+                self.choose_output_folder();
+            }
+            if ui.button(self.tr(Text::OpenOutputFolder)).clicked()
+                && let Err(error) = self.open_output_folder()
+            {
+                self.error = Some(error);
+            }
+        });
     }
 
     fn action_ui(&mut self, ui: &mut egui::Ui) {
@@ -661,7 +863,12 @@ impl FvCaptureApp {
                 self.stop_recording();
             }
         });
-        ui.label(self.tr(Text::ShortcutHint));
+        let shortcut_hint = if self.global_shortcuts.is_some() {
+            self.tr(Text::GlobalShortcutHint)
+        } else {
+            self.tr(Text::ShortcutHint)
+        };
+        ui.label(shortcut_hint);
     }
 
     fn update_dialog_ui(&mut self, ctx: &egui::Context) {
@@ -732,6 +939,34 @@ impl FvCaptureApp {
             });
     }
 
+    fn choose_output_folder(&mut self) {
+        let current_path = PathBuf::from(self.output_path.trim());
+        let file_name = current_path
+            .file_name()
+            .map(|name| name.to_owned())
+            .unwrap_or_else(|| {
+                format!("fvCapture.{}", self.config.encoder.format.extension()).into()
+            });
+        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+            self.output_path = folder.join(file_name).display().to_string();
+        }
+    }
+
+    fn output_folder(&self) -> PathBuf {
+        let path = PathBuf::from(self.output_path.trim());
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn open_output_folder(&self) -> Result<(), String> {
+        let folder = self.output_folder();
+        if !folder.exists() {
+            return Err(format!("folder does not exist: {}", folder.display()));
+        }
+        open_folder(&folder)
+    }
+
     fn selected_monitor_label(&self) -> String {
         self.sources
             .iter()
@@ -756,96 +991,77 @@ impl FvCaptureApp {
             .unwrap_or_else(|| self.tr(Text::NoWindowSelected).to_string())
     }
 
-    fn region_picker_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(source) = self.selected_monitor_source() else {
-            ui.label(self.tr(Text::NoMonitorSelected));
+    fn window_preview_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(window_id) = self.selected_window_id else {
             return;
         };
 
-        ui.label(self.tr(Text::DragToSelectRegion));
-        let max_width = ui.available_width().clamp(240.0, 500.0);
-        let max_height = 240.0;
-        let scale = (max_width / source.width as f32)
-            .min(max_height / source.height as f32)
-            .max(0.05);
-        let preview_size = egui::vec2(source.width as f32 * scale, source.height as f32 * scale);
-        let (rect, response) = ui.allocate_exact_size(preview_size, egui::Sense::click_and_drag());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(28, 31, 35));
-        painter.rect_stroke(
-            rect,
-            4.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 96, 106)),
-            egui::StrokeKind::Outside,
-        );
-
-        if (response.drag_started() || response.clicked())
-            && let Some(pos) = response.interact_pointer_pos()
-        {
-            let point = preview_to_source(rect, scale, pos);
-            self.region_drag_start = Some(point);
-            self.region_x = point.0.min(source.width.saturating_sub(1));
-            self.region_y = point.1.min(source.height.saturating_sub(1));
-            self.region_width = 1;
-            self.region_height = 1;
+        if self.window_preview_for != Some(window_id) {
+            self.window_preview_for = Some(window_id);
+            self.window_preview = None;
+            self.window_preview_error = None;
+            let config = CaptureConfig {
+                selection: CaptureSelection::Window { id: window_id },
+                fps: 1,
+            };
+            match XcapCaptureBackend::capture_once(&config, Instant::now()) {
+                Ok(frame) => {
+                    let origin = capture_origin(&config.selection).unwrap_or((0.0, 0.0));
+                    self.window_preview = Some(PreviewImage::new(
+                        frame.image,
+                        (origin.0 as i32, origin.1 as i32),
+                    ));
+                }
+                Err(error) => self.window_preview_error = Some(error.to_string()),
+            }
         }
 
-        if response.dragged()
-            && let (Some(start), Some(pos)) =
-                (self.region_drag_start, response.interact_pointer_pos())
-        {
-            let end = preview_to_source(rect, scale, pos);
-            let min_x = start.0.min(end.0).min(source.width.saturating_sub(1));
-            let min_y = start.1.min(end.1).min(source.height.saturating_sub(1));
-            let max_x = start.0.max(end.0).min(source.width);
-            let max_y = start.1.max(end.1).min(source.height);
-            self.region_x = min_x;
-            self.region_y = min_y;
-            self.region_width = max_x.saturating_sub(min_x).max(1);
-            self.region_height = max_y.saturating_sub(min_y).max(1);
+        ui.horizontal(|ui| {
+            ui.label(self.tr(Text::WindowPreview));
+            if ui.button(self.tr(Text::RefreshPreview)).clicked() {
+                self.window_preview_for = None;
+            }
+        });
+
+        if let Some(error) = &self.window_preview_error {
+            ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
         }
 
-        if response.drag_stopped() {
-            self.region_drag_start = None;
+        if let Some(preview) = &mut self.window_preview {
+            draw_preview_image(
+                ui,
+                preview,
+                egui::vec2(ui.available_width().min(520.0), 240.0),
+            );
         }
+    }
 
-        self.region_width = self
-            .region_width
-            .min(source.width.saturating_sub(self.region_x));
-        self.region_height = self
-            .region_height
-            .min(source.height.saturating_sub(self.region_y));
+    fn open_region_selector(&mut self) {
+        let Some(source) = self.selected_monitor_source() else {
+            self.error = Some(self.tr(Text::NoMonitorSelected).to_string());
+            return;
+        };
 
-        let selected_rect = egui::Rect::from_min_size(
-            rect.min + egui::vec2(self.region_x as f32 * scale, self.region_y as f32 * scale),
-            egui::vec2(
-                self.region_width.max(1) as f32 * scale,
-                self.region_height.max(1) as f32 * scale,
-            ),
-        )
-        .intersect(rect);
-        painter.rect_filled(
-            selected_rect,
-            2.0,
-            egui::Color32::from_rgba_unmultiplied(57, 255, 210, 36),
-        );
-        painter.rect_stroke(
-            selected_rect,
-            2.0,
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(57, 255, 210)),
-            egui::StrokeKind::Outside,
-        );
-
-        ui.label(format!(
-            "{}: {}, {}  {}: {}  {}: {}",
-            self.tr(Text::Position),
-            self.region_x,
-            self.region_y,
-            self.tr(Text::Width),
-            self.region_width,
-            self.tr(Text::Height),
-            self.region_height
-        ));
+        let config = CaptureConfig {
+            selection: CaptureSelection::Monitor { id: source.id },
+            fps: 1,
+        };
+        match XcapCaptureBackend::capture_once(&config, Instant::now()) {
+            Ok(frame) => {
+                self.region_selector = Some(RegionSelectorState {
+                    preview: PreviewImage::new(frame.image, (source.x, source.y)),
+                    drag_start: None,
+                    selection: Some((
+                        self.region_x,
+                        self.region_y,
+                        self.region_width,
+                        self.region_height,
+                    )),
+                });
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
     }
 
     fn overlay_preview_ui(&self, ui: &mut egui::Ui) {
@@ -917,19 +1133,126 @@ impl FvCaptureApp {
 
         if self.config.overlay.show_cursor {
             let pos = egui::pos2(rect.right() - 86.0, rect.center().y - 24.0);
-            let color = color32(self.config.overlay.cursor_color, 235);
-            painter.line_segment(
-                [pos, pos + egui::vec2(16.0, 28.0)],
-                egui::Stroke::new(3.0, color),
+            draw_egui_cursor(
+                &painter,
+                pos,
+                color32(self.config.overlay.cursor_color, 245),
             );
-            painter.line_segment(
-                [pos + egui::vec2(16.0, 28.0), pos + egui::vec2(4.0, 22.0)],
-                egui::Stroke::new(3.0, color),
+        }
+    }
+
+    fn open_screen_overlay_preview(&mut self) {
+        let selection = match self.current_selection() {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        let config = CaptureConfig {
+            selection: selection.clone(),
+            fps: 1,
+        };
+        match XcapCaptureBackend::capture_once(&config, Instant::now()) {
+            Ok(mut frame) => {
+                let timeline = preview_timeline(frame.image.width(), frame.image.height());
+                composite_frame(&mut frame.image, &timeline, 100, &self.config.overlay);
+                let origin = capture_origin(&selection).unwrap_or((0.0, 0.0));
+                self.screen_overlay_preview = Some(ScreenOverlayPreviewState {
+                    preview: PreviewImage::new(frame.image, (origin.0 as i32, origin.1 as i32)),
+                });
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn region_selector_viewport(&mut self, ctx: &egui::Context) {
+        let Some(state) = &mut self.region_selector else {
+            return;
+        };
+
+        let viewport_id = egui::ViewportId::from_hash_of("region_selector");
+        let size = egui::vec2(
+            state.preview.source_size.0.max(320) as f32,
+            state.preview.source_size.1.max(240) as f32,
+        );
+        let position = egui::pos2(state.preview.origin.0 as f32, state.preview.origin.1 as f32);
+        let builder = egui::ViewportBuilder::default()
+            .with_title("fvCapture")
+            .with_position(position)
+            .with_inner_size(size)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_always_on_top();
+
+        let mut action = RegionSelectorAction::None;
+        ctx.show_viewport_immediate(viewport_id, builder, |ui, _| {
+            action = region_selector_contents(ui, state);
+        });
+
+        match action {
+            RegionSelectorAction::None => {}
+            RegionSelectorAction::Cancel => {
+                ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
+                self.region_selector = None;
+            }
+            RegionSelectorAction::Apply(x, y, width, height) => {
+                self.region_x = x;
+                self.region_y = y;
+                self.region_width = width.max(1);
+                self.region_height = height.max(1);
+                ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
+                self.region_selector = None;
+            }
+        }
+    }
+
+    fn screen_overlay_preview_viewport(&mut self, ctx: &egui::Context) {
+        let close_preview = self.tr(Text::ClosePreview);
+        let Some(state) = &mut self.screen_overlay_preview else {
+            return;
+        };
+
+        let viewport_id = egui::ViewportId::from_hash_of("screen_overlay_preview");
+        let position = egui::pos2(state.preview.origin.0 as f32, state.preview.origin.1 as f32);
+        let size = egui::vec2(
+            state.preview.source_size.0.max(320) as f32,
+            state.preview.source_size.1.max(240) as f32,
+        );
+        let builder = egui::ViewportBuilder::default()
+            .with_title("fvCapture Preview")
+            .with_position(position)
+            .with_inner_size(size)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_always_on_top();
+
+        let mut close = false;
+        ctx.show_viewport_immediate(viewport_id, builder, |ui, _| {
+            let rect = ui.max_rect();
+            let response = ui.allocate_rect(rect, egui::Sense::click());
+            let texture_id = state.preview.texture_id(ui.ctx(), "screen_overlay_preview");
+            ui.painter().image(
+                texture_id,
+                rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
             );
-            painter.line_segment(
-                [pos + egui::vec2(4.0, 22.0), pos],
-                egui::Stroke::new(3.0, color),
-            );
+            if ui.input(|input| input.key_pressed(egui::Key::Escape)) || response.double_clicked() {
+                close = true;
+            }
+            egui::Area::new("screen_overlay_preview_actions".into())
+                .fixed_pos(rect.left_top() + egui::vec2(16.0, 16.0))
+                .show(ui.ctx(), |ui| {
+                    if ui.button(close_preview).clicked() {
+                        close = true;
+                    }
+                });
+        });
+        if close {
+            ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
+            self.screen_overlay_preview = None;
         }
     }
 
@@ -1083,11 +1406,273 @@ impl Tr for FvCaptureApp {
     }
 }
 
-fn preview_to_source(rect: egui::Rect, scale: f32, pos: egui::Pos2) -> (u32, u32) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionSelectorAction {
+    None,
+    Cancel,
+    Apply(u32, u32, u32, u32),
+}
+
+fn region_selector_contents(
+    ui: &mut egui::Ui,
+    state: &mut RegionSelectorState,
+) -> RegionSelectorAction {
+    let rect = ui.max_rect();
+    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+    let texture_id = state.preview.texture_id(ui.ctx(), "region_selector");
+    let painter = ui.painter_at(rect);
+    painter.image(
+        texture_id,
+        rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+
+    if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        return RegionSelectorAction::Cancel;
+    }
+
+    if (response.drag_started() || response.clicked())
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let point = preview_to_source(rect, state.preview.source_size, pos);
+        state.drag_start = Some(point);
+        state.selection = Some((point.0, point.1, 1, 1));
+    }
+
+    if response.dragged()
+        && let (Some(start), Some(pos)) = (state.drag_start, response.interact_pointer_pos())
+    {
+        let end = preview_to_source(rect, state.preview.source_size, pos);
+        let min_x = start.0.min(end.0);
+        let min_y = start.1.min(end.1);
+        let max_x = start.0.max(end.0).min(state.preview.source_size.0);
+        let max_y = start.1.max(end.1).min(state.preview.source_size.1);
+        state.selection = Some((
+            min_x,
+            min_y,
+            max_x.saturating_sub(min_x).max(1),
+            max_y.saturating_sub(min_y).max(1),
+        ));
+    }
+
+    if response.drag_stopped() {
+        state.drag_start = None;
+    }
+
+    if let Some((x, y, width, height)) = state.selection {
+        let selected_rect =
+            source_rect_to_ui_rect(rect, state.preview.source_size, x, y, width, height)
+                .intersect(rect);
+        draw_dim_outside(&painter, rect, selected_rect);
+        painter.rect_stroke(
+            selected_rect,
+            0.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(57, 255, 210)),
+            egui::StrokeKind::Outside,
+        );
+        let mut action = RegionSelectorAction::None;
+        egui::Area::new("region_selector_actions".into())
+            .fixed_pos(selected_rect.left_top() + egui::vec2(12.0, 12.0))
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        action = RegionSelectorAction::Apply(x, y, width, height);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = RegionSelectorAction::Cancel;
+                    }
+                });
+            });
+        return action;
+    }
+
+    draw_dim_outside(&painter, rect, egui::Rect::NOTHING);
+    RegionSelectorAction::None
+}
+
+fn draw_dim_outside(painter: &egui::Painter, rect: egui::Rect, selected: egui::Rect) {
+    let dim = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 96);
+    if selected.is_positive() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, selected.min.y)),
+            0.0,
+            dim,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.min.x, selected.max.y), rect.max),
+            0.0,
+            dim,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.min.x, selected.min.y),
+                egui::pos2(selected.min.x, selected.max.y),
+            ),
+            0.0,
+            dim,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(selected.max.x, selected.min.y),
+                egui::pos2(rect.max.x, selected.max.y),
+            ),
+            0.0,
+            dim,
+        );
+    } else {
+        painter.rect_filled(rect, 0.0, dim);
+    }
+}
+
+fn draw_preview_image(ui: &mut egui::Ui, preview: &mut PreviewImage, max_size: egui::Vec2) {
+    let source = egui::vec2(preview.source_size.0 as f32, preview.source_size.1 as f32);
+    let scale = (max_size.x / source.x).min(max_size.y / source.y).min(1.0);
+    let size = egui::vec2((source.x * scale).max(1.0), (source.y * scale).max(1.0));
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let texture_id = preview.texture_id(ui.ctx(), "preview_image");
+    ui.painter().image(
+        texture_id,
+        rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+    ui.painter().rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 96, 106)),
+        egui::StrokeKind::Outside,
+    );
+}
+
+fn preview_timeline(width: u32, height: u32) -> OverlayTimeline {
+    let x = width as f64 * 0.72;
+    let y = height as f64 * 0.45;
+    OverlayTimeline {
+        events: vec![
+            OverlayEvent {
+                start_ms: 0,
+                duration_ms: 1_000,
+                kind: OverlayEventKind::KeyCombo(vec![
+                    KeyCode::Control,
+                    KeyCode::Shift,
+                    KeyCode::Character('S'),
+                ]),
+            },
+            OverlayEvent {
+                start_ms: 0,
+                duration_ms: 700,
+                kind: OverlayEventKind::MouseClick {
+                    button: MouseButton::Left,
+                    x,
+                    y,
+                },
+            },
+        ],
+        mouse_positions: vec![(0, Point { x, y })],
+    }
+}
+
+fn draw_egui_cursor(painter: &egui::Painter, pos: egui::Pos2, fill: egui::Color32) {
+    let outline = egui::Color32::from_rgb(3, 8, 12);
+    let outer = [
+        egui::pos2(pos.x, pos.y),
+        egui::pos2(pos.x, pos.y + 29.0),
+        egui::pos2(pos.x + 8.0, pos.y + 21.0),
+        egui::pos2(pos.x + 13.0, pos.y + 33.0),
+        egui::pos2(pos.x + 18.0, pos.y + 31.0),
+        egui::pos2(pos.x + 13.0, pos.y + 19.0),
+        egui::pos2(pos.x + 24.0, pos.y + 19.0),
+    ];
+    let inner = [
+        egui::pos2(pos.x + 3.0, pos.y + 7.0),
+        egui::pos2(pos.x + 3.0, pos.y + 22.0),
+        egui::pos2(pos.x + 9.0, pos.y + 16.0),
+        egui::pos2(pos.x + 14.0, pos.y + 28.0),
+        egui::pos2(pos.x + 15.0, pos.y + 27.0),
+        egui::pos2(pos.x + 10.0, pos.y + 15.0),
+        egui::pos2(pos.x + 18.0, pos.y + 16.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        outer.to_vec(),
+        outline,
+        egui::Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        inner.to_vec(),
+        fill,
+        egui::Stroke::NONE,
+    ));
+}
+
+fn rgba_image_to_color_image(image: &RgbaImage) -> egui::ColorImage {
+    egui::ColorImage::from_rgba_unmultiplied(
+        [image.width() as usize, image.height() as usize],
+        image.as_raw(),
+    )
+}
+
+fn load_app_icon() -> Option<egui::IconData> {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/fvCapture.png")).ok()
+}
+
+fn open_folder(folder: &Path) -> Result<(), String> {
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("explorer");
+        command.arg(folder);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(folder);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(folder);
+        command
+    };
+    suppress_console_window(&mut command);
+    command.spawn().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn suppress_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn suppress_console_window(_command: &mut Command) {}
+
+fn preview_to_source(rect: egui::Rect, source_size: (u32, u32), pos: egui::Pos2) -> (u32, u32) {
     let local = (pos - rect.min).clamp(egui::Vec2::ZERO, rect.size());
     (
-        (local.x / scale).round().max(0.0) as u32,
-        (local.y / scale).round().max(0.0) as u32,
+        ((local.x / rect.width().max(1.0)) * source_size.0 as f32)
+            .round()
+            .max(0.0)
+            .min(source_size.0 as f32) as u32,
+        ((local.y / rect.height().max(1.0)) * source_size.1 as f32)
+            .round()
+            .max(0.0)
+            .min(source_size.1 as f32) as u32,
+    )
+}
+
+fn source_rect_to_ui_rect(
+    rect: egui::Rect,
+    source_size: (u32, u32),
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> egui::Rect {
+    let scale_x = rect.width() / source_size.0.max(1) as f32;
+    let scale_y = rect.height() / source_size.1.max(1) as f32;
+    egui::Rect::from_min_size(
+        rect.min + egui::vec2(x as f32 * scale_x, y as f32 * scale_y),
+        egui::vec2(width as f32 * scale_x, height as f32 * scale_y),
     )
 }
 
@@ -1153,11 +1738,11 @@ mod tests {
         let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(200.0, 100.0));
 
         assert_eq!(
-            preview_to_source(rect, 0.5, egui::pos2(60.0, 70.0)),
+            preview_to_source(rect, (400, 200), egui::pos2(60.0, 70.0)),
             (100, 100)
         );
         assert_eq!(
-            preview_to_source(rect, 0.5, egui::pos2(-10.0, -10.0)),
+            preview_to_source(rect, (400, 200), egui::pos2(-10.0, -10.0)),
             (0, 0)
         );
     }

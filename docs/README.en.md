@@ -33,12 +33,12 @@ curl -fsSL https://raw.githubusercontent.com/dikmri/fvCapture/main/scripts/insta
 
 GUI:
 
-1. Choose full screen, monitor, or area from `Capture Source`.
-2. For area capture, drag on the preview to select the capture region. Window capture is also available.
+1. Choose full screen, monitor, window, or area from `Capture Source`. Window capture shows a preview of the selected window.
+2. For area capture, use `Select on screen` and drag on the actual screen to select the capture region.
 3. In `Overlay`, adjust keyboard, mouse, cursor, label position, colors, and display duration.
-4. Use `Preview` to check the label appearance before recording.
-5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`.
-6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. F9 starts/stops recording and F10 pauses/resumes.
+4. Use `Preview` to check the label appearance before recording. `Preview on screen` shows the labels over the actual screen.
+5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`. You can also choose and open the output folder.
+6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. While the app is running, F9 starts/stops recording and F10 pauses/resumes even when fvCapture is not active.
 7. If an update is found at startup, confirm the update dialog to install it.
 
 CLI:

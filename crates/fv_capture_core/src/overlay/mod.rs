@@ -96,7 +96,7 @@ impl Default for OverlaySettings {
             keyboard_border: OverlayColor::new(235, 241, 247),
             mouse_primary: OverlayColor::new(57, 255, 210),
             mouse_secondary: OverlayColor::new(255, 255, 255),
-            cursor_color: OverlayColor::new(255, 245, 140),
+            cursor_color: OverlayColor::new(255, 255, 255),
         }
     }
 }
@@ -459,10 +459,74 @@ fn draw_text(
 }
 
 fn draw_cursor(frame: &mut RgbaImage, x: i32, y: i32, settings: &OverlaySettings) {
-    let color = rgba(settings.cursor_color, 235, settings.opacity);
-    draw_line(frame, x, y, x + 14, y + 22, color, 3);
-    draw_line(frame, x + 14, y + 22, x + 2, y + 18, color, 3);
-    draw_line(frame, x + 2, y + 18, x, y, color, 3);
+    let outline = Rgba([
+        3,
+        8,
+        12,
+        ((245.0_f32) * settings.opacity.clamp(0.0, 1.0)) as u8,
+    ]);
+    let fill = rgba(settings.cursor_color, 245, settings.opacity);
+    let outer = [
+        (x, y),
+        (x, y + 29),
+        (x + 8, y + 21),
+        (x + 13, y + 33),
+        (x + 18, y + 31),
+        (x + 13, y + 19),
+        (x + 24, y + 19),
+    ];
+    let inner = [
+        (x + 3, y + 7),
+        (x + 3, y + 22),
+        (x + 9, y + 16),
+        (x + 14, y + 28),
+        (x + 15, y + 27),
+        (x + 10, y + 15),
+        (x + 18, y + 16),
+    ];
+    fill_polygon(frame, &outer, outline);
+    fill_polygon(frame, &inner, fill);
+}
+
+fn fill_polygon(frame: &mut RgbaImage, points: &[(i32, i32)], color: Rgba<u8>) {
+    let Some(min_x) = points.iter().map(|point| point.0).min() else {
+        return;
+    };
+    let Some(max_x) = points.iter().map(|point| point.0).max() else {
+        return;
+    };
+    let Some(min_y) = points.iter().map(|point| point.1).min() else {
+        return;
+    };
+    let Some(max_y) = points.iter().map(|point| point.1).max() else {
+        return;
+    };
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            if point_in_polygon(x as f32 + 0.5, y as f32 + 0.5, points) {
+                blend_pixel(frame, x, y, color);
+            }
+        }
+    }
+}
+
+fn point_in_polygon(x: f32, y: f32, points: &[(i32, i32)]) -> bool {
+    let mut inside = false;
+    let mut previous = points.len() - 1;
+    for current in 0..points.len() {
+        let (xi, yi) = (points[current].0 as f32, points[current].1 as f32);
+        let (xj, yj) = (points[previous].0 as f32, points[previous].1 as f32);
+        let crosses = (yi > y) != (yj > y);
+        if crosses {
+            let intersect_x = (xj - xi) * (y - yi) / (yj - yi) + xi;
+            if x < intersect_x {
+                inside = !inside;
+            }
+        }
+        previous = current;
+    }
+    inside
 }
 
 fn rgba(color: OverlayColor, a: u8, opacity: f32) -> Rgba<u8> {

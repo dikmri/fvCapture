@@ -16,6 +16,8 @@ chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 eframe = "0.34.2"
 egui = "0.34.2"
 fv_capture_core = { path = "../fv_capture_core" }
+global-hotkey = "0.8.0"
+image = { version = "0.25.10", default-features = false, features = ["ico", "png"] }
 rfd = "0.15.4"
 semver = "1.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -24,6 +26,9 @@ sys-locale = "0.3.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 ureq = "3.3.0"
+
+[build-dependencies]
+winresource = "0.1.31"
 
 [dev-dependencies]
 ab_glyph = "0.2.32"

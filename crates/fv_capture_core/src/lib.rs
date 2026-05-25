@@ -16,6 +16,6 @@ pub use input::{
 };
 pub use overlay::{
     LabelPosition, OverlayColor, OverlayEvent, OverlayEventKind, OverlayLabelFont, OverlaySettings,
-    OverlayTimeline,
+    OverlayTimeline, Point, composite_frame,
 };
 pub use project::{ActiveRecording, RecordingRequest, RecordingSummary, record_blocking};
