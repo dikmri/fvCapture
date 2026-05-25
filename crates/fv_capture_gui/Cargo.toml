@@ -1,0 +1,21 @@
+[package]
+name = "fv_capture_gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fvCapture"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+eframe = "0.34.2"
+egui = "0.34.2"
+fv_capture_core = { path = "../fv_capture_core" }
+rfd = "0.15.4"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fv_capture_core",
+    "crates/fv_capture_gui",
+    "crates/fv_capture_cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["fvCapture contributors"]
+repository = "https://github.com/dikmri/fvCapture"
