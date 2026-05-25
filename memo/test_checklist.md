@@ -32,3 +32,14 @@
 - [x] `python scripts/build_readme.py --check`
 - [x] Windows コマンドインストールスクリプトを一時フォルダに実行し、GUI/CLI/同梱FFmpeg/shimの展開を確認する
 - [x] `bash -n scripts/install.sh`
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo test --workspace`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo build --workspace --release`
+- [x] `python scripts/build_readme.py --check`
+- [x] Windows更新用一時PowerShellスクリプトの構文を確認する
+- [x] `bash -n scripts/install.sh`
+- [x] Windows インストールスクリプトを v0.3.0 指定で一時フォルダに実行し、GUI/CLI/同梱FFmpeg/shimの展開を確認する
+- [x] release ビルドの GUI 実行ファイルが Windows GUI subsystem であることを確認する
+- [x] release ビルドの GUI を起動し、プロセスが正常に立ち上がることを確認する
+- [ ] v0.4.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する

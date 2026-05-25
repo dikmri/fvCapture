@@ -96,6 +96,9 @@ jobs:
           Copy-Item README.md package/
           Copy-Item LICENSE package/
           Copy-Item THIRD_PARTY_NOTICES.md package/
+          New-Item -ItemType Directory -Force -Path package/scripts | Out-Null
+          Copy-Item scripts/install.ps1 package/scripts/
+          Copy-Item scripts/install.sh package/scripts/
           New-Item -ItemType Directory -Force -Path package/third_party/fonts | Out-Null
           Copy-Item assets/fonts/MPLUS1-OFL.txt package/third_party/fonts/
           Compress-Archive -Path package/* -DestinationPath dist/${{ matrix.package }}.zip
@@ -110,6 +113,9 @@ jobs:
           cp README.md package/
           cp LICENSE package/
           cp THIRD_PARTY_NOTICES.md package/
+          mkdir -p package/scripts
+          cp scripts/install.ps1 package/scripts/
+          cp scripts/install.sh package/scripts/
           mkdir -p package/third_party/fonts
           cp assets/fonts/MPLUS1-OFL.txt package/third_party/fonts/
           tar -czf dist/${{ matrix.package }}.tar.gz -C package .

@@ -14,6 +14,7 @@ use fv_capture_core::{
     RecordingRequest, RecordingSummary, XcapCaptureBackend,
 };
 
+mod auto_update;
 mod i18n;
 mod ui_fonts;
 
@@ -67,6 +68,10 @@ struct FvCaptureApp {
     active: Option<ActiveRecording>,
     encoding_rx: Option<Receiver<Result<RecordingSummary, String>>>,
     encoding_started_at: Option<Instant>,
+    update_rx: Option<Receiver<Result<Option<auto_update::UpdateInfo>, String>>>,
+    update_available: Option<auto_update::UpdateInfo>,
+    update_error: Option<String>,
+    update_installing: bool,
     last_summary: Option<RecordingSummary>,
     status: StatusKey,
     error: Option<String>,
@@ -102,6 +107,10 @@ impl FvCaptureApp {
             active: None,
             encoding_rx: None,
             encoding_started_at: None,
+            update_rx: Some(auto_update::spawn_update_check()),
+            update_available: None,
+            update_error: None,
+            update_installing: false,
             last_summary: None,
             status: StatusKey::Ready,
             error: None,
@@ -242,6 +251,27 @@ impl FvCaptureApp {
         }
     }
 
+    fn poll_update_check(&mut self) {
+        let result = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        let Some(result) = result else {
+            return;
+        };
+
+        self.update_rx = None;
+        match result {
+            Ok(Some(info)) => {
+                self.update_available = Some(info);
+                self.update_error = None;
+            }
+            Ok(None) => {
+                self.update_error = None;
+            }
+            Err(error) => {
+                self.update_error = Some(error);
+            }
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| input.key_pressed(egui::Key::F9)) {
             if self.active.is_some() {
@@ -269,8 +299,9 @@ impl eframe::App for FvCaptureApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_encoding();
+        self.poll_update_check();
         self.handle_shortcuts(&ctx);
-        if self.active.is_some() || self.encoding_rx.is_some() {
+        if self.active.is_some() || self.encoding_rx.is_some() || self.update_rx.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
@@ -279,6 +310,7 @@ impl eframe::App for FvCaptureApp {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| self.content_ui(ui));
             });
+        self.update_dialog_ui(&ctx);
     }
 }
 
@@ -307,9 +339,21 @@ impl FvCaptureApp {
         if self.encoding_rx.is_some() {
             self.encoding_progress_ui(ui);
         }
+        if self.update_rx.is_some() {
+            ui.label(self.tr(Text::UpdateChecking));
+        }
+        if self.update_installing {
+            ui.label(self.tr(Text::UpdateInstalling));
+        }
 
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
+        }
+        if let Some(error) = &self.update_error {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 80, 80),
+                format!("{}: {error}", self.tr(Text::UpdateCheckFailed)),
+            );
         }
         if let Some(error) = &self.ui_font_error {
             ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
@@ -618,6 +662,74 @@ impl FvCaptureApp {
             }
         });
         ui.label(self.tr(Text::ShortcutHint));
+    }
+
+    fn update_dialog_ui(&mut self, ctx: &egui::Context) {
+        let Some(info) = self.update_available.clone() else {
+            return;
+        };
+
+        let can_update = self.active.is_none() && self.encoding_rx.is_none();
+        egui::Window::new(self.tr(Text::UpdateAvailable))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(self.tr(Text::UpdateAvailableBody));
+                ui.add_space(4.0);
+                ui.label(format!(
+                    "{}: {}",
+                    self.tr(Text::CurrentVersion),
+                    auto_update::CURRENT_VERSION
+                ));
+                ui.label(format!(
+                    "{}: {}",
+                    self.tr(Text::LatestVersion),
+                    info.version
+                ));
+                ui.hyperlink_to(self.tr(Text::ReleasePage), &info.release_url);
+
+                if let Some(notes) = &info.release_notes {
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            ui.label(notes.trim());
+                        });
+                }
+
+                if !can_update {
+                    ui.add_space(8.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 160, 70),
+                        self.tr(Text::StopBeforeUpdate),
+                    );
+                }
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_update, egui::Button::new(self.tr(Text::UpdateNow)))
+                        .clicked()
+                    {
+                        match auto_update::launch_updater(&info) {
+                            Ok(()) => {
+                                self.update_installing = true;
+                                self.update_available = None;
+                                self.update_error = None;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            Err(error) => {
+                                self.update_error = Some(error.to_string());
+                                self.update_available = Some(info.clone());
+                            }
+                        }
+                    }
+                    if ui.button(self.tr(Text::Later)).clicked() {
+                        self.update_available = None;
+                    }
+                });
+            });
     }
 
     fn selected_monitor_label(&self) -> String {

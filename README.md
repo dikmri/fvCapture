@@ -6,7 +6,7 @@
 
 ## 日本語
 
-fvCapture は、画面録画と同時にキーボード・マウス操作をビジュアルラベルとして重ねるデスクトップキャプチャアプリです。説明動画、バグ報告、手順共有向けに MP4 / GIF / WebM を出力できます。
+fvCapture は、画面録画と同時にキーボード・マウス操作をビジュアルラベルとして重ねるデスクトップキャプチャアプリです。説明動画、バグ報告、手順共有向けに MP4 / GIF / WebM を出力できます。起動時に GitHub Releases の最新版を確認し、アップデートがある場合はユーザー確認後に自動で更新できます。
 
 ### ダウンロード
 
@@ -45,6 +45,7 @@ GUI:
 4. `プレビュー` でラベルの見た目を確認します。
 5. `出力` で MP4 / GIF / WebM、FPS、サイズ、保存先を選びます。
 6. `録画開始` で録画開始、`一時停止` / `再開`、`停止` で保存します。F9で録画開始/停止、F10で一時停止/再開できます。
+7. 起動時にアップデートが見つかった場合は、確認ダイアログから更新できます。
 
 CLI:
 
@@ -68,7 +69,7 @@ fvCapture 本体は MIT License です。
 
 ## English
 
-fvCapture is a desktop screen capture app that records the screen and overlays keyboard and mouse actions as visual labels. It exports MP4, GIF, and WebM files for tutorials, bug reports, and workflow sharing.
+fvCapture is a desktop screen capture app that records the screen and overlays keyboard and mouse actions as visual labels. It exports MP4, GIF, and WebM files for tutorials, bug reports, and workflow sharing. On startup, it checks GitHub Releases for a newer version and can update itself after user confirmation.
 
 ### Download
 
@@ -107,6 +108,7 @@ GUI:
 4. Use `Preview` to check the label appearance before recording.
 5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`.
 6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. F9 starts/stops recording and F10 pauses/resumes.
+7. If an update is found at startup, confirm the update dialog to install it.
 
 CLI:
 

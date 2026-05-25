@@ -5,6 +5,7 @@ repo="dikmri/fvCapture"
 version="${FVCAPTURE_VERSION:-latest}"
 install_dir="${FVCAPTURE_INSTALL_DIR:-$HOME/.local/share/fvCapture}"
 bin_dir="${FVCAPTURE_BIN_DIR:-$HOME/.local/bin}"
+skip_links="${FVCAPTURE_SKIP_LINKS:-0}"
 
 case "$(uname -s)" in
     Darwin*) asset="fvCapture-macos.tar.gz" ;;
@@ -29,7 +30,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$extract_dir" "$install_dir" "$bin_dir"
+mkdir -p "$extract_dir" "$install_dir"
+if [ "$skip_links" != "1" ]; then
+    mkdir -p "$bin_dir"
+fi
 
 echo "Downloading $asset..."
 if command -v curl >/dev/null 2>&1; then
@@ -46,14 +50,20 @@ tar -xzf "$archive" -C "$extract_dir"
 cp -R "$extract_dir"/. "$install_dir"/
 chmod +x "$install_dir/fvCapture" "$install_dir/fv-capture"
 
-ln -sf "$install_dir/fvCapture" "$bin_dir/fvCapture"
-ln -sf "$install_dir/fv-capture" "$bin_dir/fv-capture"
+if [ "$skip_links" != "1" ]; then
+    ln -sf "$install_dir/fvCapture" "$bin_dir/fvCapture"
+    ln -sf "$install_dir/fv-capture" "$bin_dir/fv-capture"
+fi
 
 echo "fvCapture installed to $install_dir"
-echo "Run: fvCapture"
-case ":$PATH:" in
-    *":$bin_dir:"*) ;;
-    *)
-        echo "Add $bin_dir to PATH if the command is not found."
-        ;;
-esac
+if [ "$skip_links" = "1" ]; then
+    echo "Run: $install_dir/fvCapture"
+else
+    echo "Run: fvCapture"
+    case ":$PATH:" in
+        *":$bin_dir:"*) ;;
+        *)
+            echo "Add $bin_dir to PATH if the command is not found."
+            ;;
+    esac
+fi

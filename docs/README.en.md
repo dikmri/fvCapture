@@ -1,6 +1,6 @@
 ## English
 
-fvCapture is a desktop screen capture app that records the screen and overlays keyboard and mouse actions as visual labels. It exports MP4, GIF, and WebM files for tutorials, bug reports, and workflow sharing.
+fvCapture is a desktop screen capture app that records the screen and overlays keyboard and mouse actions as visual labels. It exports MP4, GIF, and WebM files for tutorials, bug reports, and workflow sharing. On startup, it checks GitHub Releases for a newer version and can update itself after user confirmation.
 
 ### Download
 
@@ -39,6 +39,7 @@ GUI:
 4. Use `Preview` to check the label appearance before recording.
 5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`.
 6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. F9 starts/stops recording and F10 pauses/resumes.
+7. If an update is found at startup, confirm the update dialog to install it.
 
 CLI:
 
