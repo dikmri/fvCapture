@@ -42,4 +42,5 @@
 - [x] Windows インストールスクリプトを v0.3.0 指定で一時フォルダに実行し、GUI/CLI/同梱FFmpeg/shimの展開を確認する
 - [x] release ビルドの GUI 実行ファイルが Windows GUI subsystem であることを確認する
 - [x] release ビルドの GUI を起動し、プロセスが正常に立ち上がることを確認する
-- [ ] v0.4.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する
+- [x] v0.4.0 GitHub Actions release を実行し、Windows/macOS/Linux成果物と日本語リリースノートを確認する
+- [x] v0.4.0 Windows リリースアーカイブを展開し、GUI subsystem、同梱FFmpeg、同梱インストールスクリプトを確認する
