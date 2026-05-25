@@ -52,6 +52,8 @@ jobs:
             libwayland-dev \
             libegl1-mesa-dev \
             libgl1-mesa-dev \
+            libgbm-dev \
+            libdrm-dev \
             libpipewire-0.3-dev \
             libdbus-1-dev
 
