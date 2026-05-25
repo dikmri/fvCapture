@@ -7,6 +7,10 @@ use fv_capture_core::{
     OutputSize, RecordingRequest, RecordingSummary, XcapCaptureBackend,
 };
 
+mod i18n;
+
+use i18n::{LanguageChoice, Text, Tr};
+
 fn main() -> eframe::Result {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -47,8 +51,18 @@ struct FvCaptureApp {
     output_path: String,
     active: Option<ActiveRecording>,
     last_summary: Option<RecordingSummary>,
-    status: String,
+    status: StatusKey,
     error: Option<String>,
+    language: LanguageChoice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusKey {
+    Ready,
+    Recording,
+    Paused,
+    Encoding,
+    Saved,
 }
 
 impl FvCaptureApp {
@@ -65,8 +79,9 @@ impl FvCaptureApp {
             output_path: default_output_path(OutputFormat::Mp4).display().to_string(),
             active: None,
             last_summary: None,
-            status: "Ready".to_string(),
+            status: StatusKey::Ready,
             error: None,
+            language: LanguageChoice::System,
         };
         app.refresh_sources();
         app
@@ -130,7 +145,7 @@ impl FvCaptureApp {
 
         self.active = Some(ActiveRecording::start(request));
         self.last_summary = None;
-        self.status = "Recording".to_string();
+        self.status = StatusKey::Recording;
         self.error = None;
     }
 
@@ -138,15 +153,15 @@ impl FvCaptureApp {
         let Some(active) = self.active.take() else {
             return;
         };
-        self.status = "Encoding".to_string();
+        self.status = StatusKey::Encoding;
         match active.stop() {
             Ok(summary) => {
-                self.status = "Saved".to_string();
+                self.status = StatusKey::Saved;
                 self.last_summary = Some(summary);
                 self.error = None;
             }
             Err(error) => {
-                self.status = "Ready".to_string();
+                self.status = StatusKey::Ready;
                 self.error = Some(error.to_string());
             }
         }
@@ -164,11 +179,17 @@ impl eframe::App for FvCaptureApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.heading("fvCapture");
-            ui.label("Record screen actions with keyboard and mouse overlays.");
+            ui.label(self.tr(Text::Intro));
             ui.separator();
 
+            self.language_ui(ui);
+
             ui.horizontal(|ui| {
-                ui.label(format!("Status: {}", self.status));
+                ui.label(format!(
+                    "{}: {}",
+                    self.tr(Text::Status),
+                    self.status_label(self.status)
+                ));
                 if self.active.is_some() {
                     ui.spinner();
                     ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -180,9 +201,11 @@ impl eframe::App for FvCaptureApp {
             }
             if let Some(summary) = &self.last_summary {
                 ui.label(format!(
-                    "Saved: {} ({} frames)",
+                    "{}: {} ({} {})",
+                    self.tr(Text::Saved),
                     summary.output_path.display(),
-                    summary.encoded_frames
+                    summary.encoded_frames,
+                    self.tr(Text::Frames)
                 ));
             }
 
@@ -200,17 +223,21 @@ impl eframe::App for FvCaptureApp {
 
 impl FvCaptureApp {
     fn source_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Capture Source");
+        ui.heading(self.tr(Text::CaptureSource));
+        let full_screen = self.tr(Text::FullScreen);
+        let monitor = self.tr(Text::Monitor);
+        let select_area = self.tr(Text::SelectArea);
+        let refresh = self.tr(Text::Refresh);
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.source_mode, SourceMode::Primary, "Full Screen");
-            ui.radio_value(&mut self.source_mode, SourceMode::Monitor, "Monitor");
-            ui.radio_value(&mut self.source_mode, SourceMode::Region, "Select Area");
-            if ui.button("Refresh").clicked() {
+            ui.radio_value(&mut self.source_mode, SourceMode::Primary, full_screen);
+            ui.radio_value(&mut self.source_mode, SourceMode::Monitor, monitor);
+            ui.radio_value(&mut self.source_mode, SourceMode::Region, select_area);
+            if ui.button(refresh).clicked() {
                 self.refresh_sources();
             }
         });
 
-        egui::ComboBox::from_label("Monitor")
+        egui::ComboBox::from_label(monitor)
             .selected_text(self.selected_monitor_label())
             .show_ui(ui, |ui| {
                 for source in &self.sources {
@@ -239,14 +266,14 @@ impl FvCaptureApp {
                     ui.label("Y");
                     ui.add(egui::DragValue::new(&mut self.region_y).speed(1));
                     ui.end_row();
-                    ui.label("Width");
+                    ui.label(self.tr(Text::Width));
                     ui.add(
                         egui::DragValue::new(&mut self.region_width)
                             .range(1..=16_384)
                             .speed(2),
                     );
                     ui.end_row();
-                    ui.label("Height");
+                    ui.label(self.tr(Text::Height));
                     ui.add(
                         egui::DragValue::new(&mut self.region_height)
                             .range(1..=16_384)
@@ -258,26 +285,31 @@ impl FvCaptureApp {
     }
 
     fn overlay_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Overlay");
-        ui.checkbox(
-            &mut self.config.overlay.show_keyboard,
-            "Show keyboard labels",
-        );
-        ui.checkbox(&mut self.config.overlay.show_mouse, "Show mouse labels");
+        ui.heading(self.tr(Text::Overlay));
+        let show_keyboard = self.tr(Text::ShowKeyboardLabels);
+        let show_mouse = self.tr(Text::ShowMouseLabels);
+        let label_size = self.tr(Text::LabelSize);
+        let opacity = self.tr(Text::Opacity);
+        ui.checkbox(&mut self.config.overlay.show_keyboard, show_keyboard);
+        ui.checkbox(&mut self.config.overlay.show_mouse, show_mouse);
         ui.add(
-            egui::Slider::new(&mut self.config.overlay.label_scale, 0.75..=2.0).text("Label size"),
+            egui::Slider::new(&mut self.config.overlay.label_scale, 0.75..=2.0).text(label_size),
         );
-        ui.add(egui::Slider::new(&mut self.config.overlay.opacity, 0.2..=1.0).text("Opacity"));
+        ui.add(egui::Slider::new(&mut self.config.overlay.opacity, 0.2..=1.0).text(opacity));
     }
 
     fn output_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Output");
+        ui.heading(self.tr(Text::Output));
         let mut format_changed = false;
+        let format = self.tr(Text::Format);
+        let fps = self.tr(Text::Fps);
+        let size = self.tr(Text::Size);
+        let original = self.tr(Text::Original);
         egui::Grid::new("output_grid")
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Format");
+                ui.label(format);
                 egui::ComboBox::from_id_salt("format")
                     .selected_text(format_label(self.config.encoder.format))
                     .show_ui(ui, |ui| {
@@ -305,7 +337,7 @@ impl FvCaptureApp {
                     });
                 ui.end_row();
 
-                ui.label("FPS");
+                ui.label(fps);
                 ui.add(
                     egui::DragValue::new(&mut self.config.capture.fps)
                         .range(1..=60)
@@ -313,14 +345,14 @@ impl FvCaptureApp {
                 );
                 ui.end_row();
 
-                ui.label("Size");
+                ui.label(size);
                 egui::ComboBox::from_id_salt("size")
-                    .selected_text(size_label(self.config.encoder.size))
+                    .selected_text(self.size_label(self.config.encoder.size))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut self.config.encoder.size,
                             OutputSize::Original,
-                            "Original",
+                            original,
                         );
                         ui.selectable_value(
                             &mut self.config.encoder.size,
@@ -342,7 +374,7 @@ impl FvCaptureApp {
 
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.output_path);
-            if ui.button("Browse").clicked()
+            if ui.button(self.tr(Text::Browse)).clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .set_file_name(format!(
                         "fvCapture.{}",
@@ -359,7 +391,7 @@ impl FvCaptureApp {
         ui.horizontal(|ui| {
             let recording = self.active.is_some();
             if ui
-                .add_enabled(!recording, egui::Button::new("Start Recording"))
+                .add_enabled(!recording, egui::Button::new(self.tr(Text::StartRecording)))
                 .clicked()
             {
                 self.start_recording();
@@ -367,20 +399,24 @@ impl FvCaptureApp {
 
             if let Some(active) = &self.active {
                 let paused = active.is_paused();
-                let label = if paused { "Resume" } else { "Pause" };
+                let label = if paused {
+                    self.tr(Text::Resume)
+                } else {
+                    self.tr(Text::Pause)
+                };
                 if ui.button(label).clicked() {
                     if paused {
                         active.resume();
-                        self.status = "Recording".to_string();
+                        self.status = StatusKey::Recording;
                     } else {
                         active.pause();
-                        self.status = "Paused".to_string();
+                        self.status = StatusKey::Paused;
                     }
                 }
             }
 
             if ui
-                .add_enabled(recording, egui::Button::new("Stop"))
+                .add_enabled(recording, egui::Button::new(self.tr(Text::Stop)))
                 .clicked()
             {
                 self.stop_recording();
@@ -393,7 +429,57 @@ impl FvCaptureApp {
             .iter()
             .find(|source| Some(source.id) == self.selected_monitor_id)
             .map(|source| source.name.clone())
-            .unwrap_or_else(|| "Primary monitor".to_string())
+            .unwrap_or_else(|| self.tr(Text::PrimaryMonitor).to_string())
+    }
+
+    fn language_ui(&mut self, ui: &mut egui::Ui) {
+        let language = self.tr(Text::Language);
+        let system = self.tr(Text::SystemLanguage);
+        let english = self.tr(Text::English);
+        let japanese = self.tr(Text::Japanese);
+        let selected = self.language_label(self.language);
+        ui.horizontal(|ui| {
+            ui.label(language);
+            egui::ComboBox::from_id_salt("language")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.language, LanguageChoice::System, system);
+                    ui.selectable_value(&mut self.language, LanguageChoice::English, english);
+                    ui.selectable_value(&mut self.language, LanguageChoice::Japanese, japanese);
+                });
+        });
+    }
+
+    fn status_label(&self, status: StatusKey) -> &'static str {
+        match status {
+            StatusKey::Ready => self.tr(Text::Ready),
+            StatusKey::Recording => self.tr(Text::Recording),
+            StatusKey::Paused => self.tr(Text::Paused),
+            StatusKey::Encoding => self.tr(Text::Encoding),
+            StatusKey::Saved => self.tr(Text::Saved),
+        }
+    }
+
+    fn language_label(&self, language: LanguageChoice) -> &'static str {
+        match language {
+            LanguageChoice::System => self.tr(Text::SystemLanguage),
+            LanguageChoice::English => self.tr(Text::English),
+            LanguageChoice::Japanese => self.tr(Text::Japanese),
+        }
+    }
+
+    fn size_label(&self, size: OutputSize) -> &'static str {
+        match size {
+            OutputSize::Original => self.tr(Text::Original),
+            OutputSize::P720 => "720p",
+            OutputSize::P480 => "480p",
+        }
+    }
+}
+
+impl Tr for FvCaptureApp {
+    fn language_choice(&self) -> LanguageChoice {
+        self.language
     }
 }
 
@@ -407,13 +493,5 @@ fn format_label(format: OutputFormat) -> &'static str {
         OutputFormat::Mp4 => "MP4",
         OutputFormat::Gif => "GIF",
         OutputFormat::WebM => "WebM",
-    }
-}
-
-fn size_label(size: OutputSize) -> &'static str {
-    match size {
-        OutputSize::Original => "Original",
-        OutputSize::P720 => "720p",
-        OutputSize::P480 => "480p",
     }
 }

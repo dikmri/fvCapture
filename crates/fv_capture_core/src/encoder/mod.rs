@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsString,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -87,9 +86,9 @@ pub fn encode_png_sequence(
     let args = build_ffmpeg_args(&pattern, config, output_path);
     tracing::info!(?args, "starting ffmpeg encode");
     let output = Command::new(ffmpeg_binary())
-        .args(args.iter().map(OsString::from))
+        .args(&args)
         .output()
-        .context("failed to start ffmpeg. Install FFmpeg or set FVCAPTURE_FFMPEG")?;
+        .context("failed to start FFmpeg. The bundled binary was not found; set FVCAPTURE_FFMPEG to override")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -191,8 +190,32 @@ fn gif_filter(config: &EncoderConfig) -> String {
     .replace(" ,", ",")
 }
 
-fn ffmpeg_binary() -> OsString {
-    std::env::var_os("FVCAPTURE_FFMPEG").unwrap_or_else(|| OsString::from("ffmpeg"))
+pub fn ffmpeg_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("FVCAPTURE_FFMPEG") {
+        return PathBuf::from(path);
+    }
+
+    if let Some(path) = bundled_ffmpeg_path() {
+        return path;
+    }
+
+    PathBuf::from("ffmpeg")
+}
+
+fn bundled_ffmpeg_path() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let binary_name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let candidates = [
+        exe_dir.join("third_party").join("ffmpeg").join(binary_name),
+        exe_dir.join("ffmpeg").join(binary_name),
+        exe_dir.join(binary_name),
+    ];
+
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 #[cfg(test)]
@@ -238,5 +261,10 @@ mod tests {
         assert!(vf.contains("palettegen"));
         assert!(vf.contains("fps=10"));
         assert!(vf.contains("scale=720"));
+    }
+
+    #[test]
+    fn ffmpeg_binary_can_fall_back_to_path_lookup() {
+        assert_eq!(ffmpeg_binary(), PathBuf::from("ffmpeg"));
     }
 }

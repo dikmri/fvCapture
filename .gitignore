@@ -5,4 +5,8 @@
 /*.gif
 /*.webm
 /fvCapture-test-output/
+/.ffmpeg/
+/.tmp-npm/
+/package/
+/dist/
 *.log

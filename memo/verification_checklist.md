@@ -14,3 +14,7 @@
 - [x] README、LICENSE、GitHub Actions のリリース設定がある
 - [x] GitHub public repository に push されている
 - [x] GitHub Actions でクロスプラットフォーム release workflow が動く
+- [x] FFmpeg をリリースアーカイブに同梱できる
+- [x] 同梱 FFmpeg を PATH なしで優先利用できる
+- [x] GUI と README が日本語/英語に対応している
+- [x] README 生成チェックで多言語READMEの同期漏れを検出できる

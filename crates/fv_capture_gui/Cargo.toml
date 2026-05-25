@@ -17,5 +17,6 @@ eframe = "0.34.2"
 egui = "0.34.2"
 fv_capture_core = { path = "../fv_capture_core" }
 rfd = "0.15.4"
+sys-locale = "0.3.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

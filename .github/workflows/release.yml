@@ -30,6 +30,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -63,11 +71,20 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Check generated README
+        run: python scripts/build_readme.py --check
+
       - name: Test
         run: cargo test --workspace
 
       - name: Build
         run: cargo build --workspace --release
+
+      - name: Install bundled FFmpeg
+        run: npm install --prefix .ffmpeg ffmpeg-static@5.3.0
+
+      - name: Stage bundled FFmpeg
+        run: node scripts/stage_ffmpeg_static.mjs package/third_party/ffmpeg
 
       - name: Package Windows
         if: runner.os == 'Windows'
@@ -78,6 +95,7 @@ jobs:
           Copy-Item target/release/fv-capture.exe package/
           Copy-Item README.md package/
           Copy-Item LICENSE package/
+          Copy-Item THIRD_PARTY_NOTICES.md package/
           Compress-Archive -Path package/* -DestinationPath dist/${{ matrix.package }}.zip
 
       - name: Package Unix
@@ -89,6 +107,7 @@ jobs:
           cp target/release/fv-capture package/
           cp README.md package/
           cp LICENSE package/
+          cp THIRD_PARTY_NOTICES.md package/
           tar -czf dist/${{ matrix.package }}.tar.gz -C package .
 
       - name: Upload artifact
