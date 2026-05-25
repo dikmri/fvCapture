@@ -12,5 +12,5 @@
 - [x] GIF を出力できる
 - [x] WebM を出力できる
 - [x] README、LICENSE、GitHub Actions のリリース設定がある
-- [ ] GitHub public repository に push されている
+- [x] GitHub public repository に push されている
 - [ ] GitHub Actions でクロスプラットフォーム release workflow が動く
