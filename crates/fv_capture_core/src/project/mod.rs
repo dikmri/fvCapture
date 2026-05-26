@@ -81,6 +81,16 @@ impl RecordingProject {
         end_frame: usize,
         output_path: &Path,
     ) -> Result<RecordingSummary> {
+        self.encode_range_with_config(start_frame, end_frame, &self.encoder, output_path)
+    }
+
+    pub fn encode_range_with_config(
+        &self,
+        start_frame: usize,
+        end_frame: usize,
+        encoder: &EncoderConfig,
+        output_path: &Path,
+    ) -> Result<RecordingSummary> {
         if self.frame_count == 0 {
             return Err(anyhow!("cannot encode an empty recording"));
         }
@@ -92,7 +102,7 @@ impl RecordingProject {
             &self.frame_dir,
             start_frame,
             frame_count,
-            &self.encoder,
+            encoder,
             output_path,
         )?;
 

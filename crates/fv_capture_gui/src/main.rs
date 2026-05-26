@@ -3,7 +3,10 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -21,6 +24,7 @@ use global_hotkey::{
     hotkey::{Code, HotKey},
 };
 use image::{ImageReader, Rgba, RgbaImage};
+use serde::{Deserialize, Serialize};
 
 mod auto_update;
 mod i18n;
@@ -36,8 +40,9 @@ fn main() -> eframe::Result {
         .init();
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([820.0, 680.0])
-        .with_min_inner_size([760.0, 620.0]);
+        .with_position([32.0, 32.0])
+        .with_inner_size([780.0, 620.0])
+        .with_min_inner_size([680.0, 520.0]);
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -57,8 +62,9 @@ fn main() -> eframe::Result {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum SourceMode {
+    #[default]
     Primary,
     Monitor,
     Window,
@@ -69,7 +75,6 @@ enum SourceMode {
 enum AppTab {
     Capture,
     Overlay,
-    Output,
     Appearance,
 }
 
@@ -221,6 +226,38 @@ enum ShortcutAction {
     PauseResume,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct SavedGuiSettings {
+    config: AppConfig,
+    source_mode: SourceMode,
+    selected_monitor_id: Option<u32>,
+    selected_window_id: Option<u32>,
+    region_x: u32,
+    region_y: u32,
+    region_width: u32,
+    region_height: u32,
+    output_path: String,
+    language: LanguageChoice,
+}
+
+impl Default for SavedGuiSettings {
+    fn default() -> Self {
+        Self {
+            config: AppConfig::default(),
+            source_mode: SourceMode::Primary,
+            selected_monitor_id: None,
+            selected_window_id: None,
+            region_x: 0,
+            region_y: 0,
+            region_width: 1280,
+            region_height: 720,
+            output_path: default_output_path(OutputFormat::Mp4).display().to_string(),
+            language: LanguageChoice::System,
+        }
+    }
+}
+
 struct FvCaptureApp {
     config: AppConfig,
     active_tab: AppTab,
@@ -255,8 +292,10 @@ struct FvCaptureApp {
     status: StatusKey,
     error: Option<String>,
     language: LanguageChoice,
-    ui_font_config: ui_fonts::UiFontConfig,
-    ui_font_error: Option<String>,
+    settings_path: Option<PathBuf>,
+    last_saved_settings: SavedGuiSettings,
+    settings_error: Option<String>,
+    last_icon_status: Option<StatusKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,19 +314,28 @@ impl FvCaptureApp {
             Ok(shortcuts) => (Some(shortcuts), None),
             Err(error) => (None, Some(error)),
         };
+        let settings_path = settings_path();
+        let (saved_settings, settings_error) = load_saved_settings(settings_path.as_deref());
+        let output_path = if saved_settings.output_path.trim().is_empty() {
+            default_output_path(saved_settings.config.encoder.format)
+                .display()
+                .to_string()
+        } else {
+            saved_settings.output_path.clone()
+        };
         let mut app = Self {
-            config: AppConfig::default(),
+            config: saved_settings.config.clone(),
             active_tab: AppTab::Capture,
             sources: Vec::new(),
             window_sources: Vec::new(),
-            source_mode: SourceMode::Primary,
-            selected_monitor_id: None,
-            selected_window_id: None,
-            region_x: 0,
-            region_y: 0,
-            region_width: 1280,
-            region_height: 720,
-            output_path: default_output_path(OutputFormat::Mp4).display().to_string(),
+            source_mode: saved_settings.source_mode,
+            selected_monitor_id: saved_settings.selected_monitor_id,
+            selected_window_id: saved_settings.selected_window_id,
+            region_x: saved_settings.region_x,
+            region_y: saved_settings.region_y,
+            region_width: saved_settings.region_width,
+            region_height: saved_settings.region_height,
+            output_path,
             active: None,
             project_rx: None,
             encoding_rx: None,
@@ -308,11 +356,14 @@ impl FvCaptureApp {
             last_summary: None,
             status: StatusKey::Ready,
             error: None,
-            language: LanguageChoice::System,
-            ui_font_config: ui_fonts::UiFontConfig::default(),
-            ui_font_error: None,
+            language: saved_settings.language,
+            settings_path,
+            last_saved_settings: saved_settings,
+            settings_error,
+            last_icon_status: None,
         };
         app.refresh_sources();
+        app.last_saved_settings = app.saved_settings_snapshot();
         app
     }
 
@@ -320,11 +371,16 @@ impl FvCaptureApp {
         let backend = XcapCaptureBackend::default();
         match backend.list_sources() {
             Ok(sources) => {
-                self.selected_monitor_id = sources
-                    .iter()
-                    .find(|source| source.is_primary)
-                    .or_else(|| sources.first())
-                    .map(|source| source.id);
+                if self
+                    .selected_monitor_id
+                    .is_none_or(|id| !sources.iter().any(|source| source.id == id))
+                {
+                    self.selected_monitor_id = sources
+                        .iter()
+                        .find(|source| source.is_primary)
+                        .or_else(|| sources.first())
+                        .map(|source| source.id);
+                }
                 if let Some(source) = sources
                     .iter()
                     .find(|source| Some(source.id) == self.selected_monitor_id)
@@ -379,6 +435,57 @@ impl FvCaptureApp {
                 width: self.region_width.max(1),
                 height: self.region_height.max(1),
             }),
+        }
+    }
+
+    fn saved_settings_snapshot(&self) -> SavedGuiSettings {
+        let mut settings = SavedGuiSettings {
+            config: self.config.clone(),
+            source_mode: self.source_mode,
+            selected_monitor_id: self.selected_monitor_id,
+            selected_window_id: self.selected_window_id,
+            region_x: self.region_x,
+            region_y: self.region_y,
+            region_width: self.region_width,
+            region_height: self.region_height,
+            output_path: self.output_path.clone(),
+            language: self.language,
+        };
+        if let Ok(selection) = self.current_selection() {
+            settings.config.capture.selection = selection;
+        }
+        settings
+    }
+
+    fn save_settings_if_changed(&mut self) {
+        let settings = self.saved_settings_snapshot();
+        if settings == self.last_saved_settings {
+            return;
+        }
+
+        let Some(path) = &self.settings_path else {
+            self.last_saved_settings = settings;
+            return;
+        };
+
+        match save_saved_settings(path, &settings) {
+            Ok(()) => {
+                self.last_saved_settings = settings;
+                self.settings_error = None;
+            }
+            Err(error) => {
+                self.settings_error = Some(error);
+            }
+        }
+    }
+
+    fn update_window_icon(&mut self, ctx: &egui::Context) {
+        if self.last_icon_status == Some(self.status) {
+            return;
+        }
+        if let Some(icon) = load_status_icon(self.status) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(icon))));
+            self.last_icon_status = Some(self.status);
         }
     }
 
@@ -581,15 +688,19 @@ impl eframe::App for FvCaptureApp {
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        self.update_window_icon(&ctx);
 
         egui::Frame::default()
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
-                self.content_ui(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.content_ui(ui);
+                });
             });
         self.update_dialog_ui(&ctx);
         self.region_selector_viewport(&ctx);
         self.screen_overlay_preview_viewport(&ctx);
+        self.save_settings_if_changed();
     }
 }
 
@@ -643,7 +754,7 @@ impl FvCaptureApp {
                 format!("{}: {error}", self.tr(Text::UpdateCheckFailed)),
             );
         }
-        if let Some(error) = &self.ui_font_error {
+        if let Some(error) = &self.settings_error {
             ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
         }
         if let Some(summary) = &self.last_summary {
@@ -662,7 +773,6 @@ impl FvCaptureApp {
         match self.active_tab {
             AppTab::Capture => self.source_ui(ui),
             AppTab::Overlay => self.overlay_ui(ui),
-            AppTab::Output => self.output_ui(ui),
             AppTab::Appearance => self.app_appearance_ui(ui),
         }
         ui.add_space(8.0);
@@ -676,12 +786,10 @@ impl FvCaptureApp {
     fn tab_bar_ui(&mut self, ui: &mut egui::Ui) {
         let capture = self.tr(Text::CaptureTab);
         let overlay = self.tr(Text::OverlayTab);
-        let output = self.tr(Text::OutputTab);
         let appearance = self.tr(Text::AppearanceTab);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.active_tab, AppTab::Capture, capture);
             ui.selectable_value(&mut self.active_tab, AppTab::Overlay, overlay);
-            ui.selectable_value(&mut self.active_tab, AppTab::Output, output);
             ui.selectable_value(&mut self.active_tab, AppTab::Appearance, appearance);
         });
     }
@@ -701,6 +809,14 @@ impl FvCaptureApp {
             if ui.button(refresh).clicked() {
                 self.refresh_sources();
             }
+        });
+        ui.horizontal(|ui| {
+            ui.label(self.tr(Text::Fps));
+            ui.add(
+                egui::DragValue::new(&mut self.config.capture.fps)
+                    .range(1..=60)
+                    .speed(1),
+            );
         });
 
         if matches!(self.source_mode, SourceMode::Monitor | SourceMode::Region) {
@@ -863,11 +979,9 @@ impl FvCaptureApp {
         self.overlay_preview_ui(ui);
     }
 
-    fn output_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.tr(Text::Output));
+    fn output_settings_ui(&mut self, ui: &mut egui::Ui) {
         let mut format_changed = false;
         let format = self.tr(Text::Format);
-        let fps = self.tr(Text::Fps);
         let size = self.tr(Text::Size);
         let original = self.tr(Text::Original);
         egui::Grid::new("output_grid")
@@ -900,14 +1014,6 @@ impl FvCaptureApp {
                             )
                             .changed();
                     });
-                ui.end_row();
-
-                ui.label(fps);
-                ui.add(
-                    egui::DragValue::new(&mut self.config.capture.fps)
-                        .range(1..=60)
-                        .speed(1),
-                );
                 ui.end_row();
 
                 ui.label(size);
@@ -1376,12 +1482,17 @@ impl FvCaptureApp {
         let frames_label = self.tr(Text::Frames);
         let output = self.tr(Text::Output);
         let can_export = self.encoding_rx.is_none();
+        let output_path_label = self.output_path.clone();
 
         let mut export_request = None;
         let mut load_error = None;
 
         ui.add_space(8.0);
         ui.separator();
+        ui.heading(recording_preview);
+        ui.label(output);
+        self.output_settings_ui(ui);
+        ui.add_space(8.0);
 
         {
             let Some(preview) = &mut self.recording_preview else {
@@ -1396,7 +1507,6 @@ impl FvCaptureApp {
                 .saturating_sub(1)
                 .saturating_sub(preview.trim_end_frame);
 
-            ui.heading(recording_preview);
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     if preview.frame_image_index != Some(preview.current_frame) {
@@ -1439,11 +1549,7 @@ impl FvCaptureApp {
                         total_frames,
                         frames_label
                     ));
-                    ui.label(format!(
-                        "{}: {}",
-                        output,
-                        preview.project.output_path().display()
-                    ));
+                    ui.label(format!("{}: {}", output, output_path_label));
 
                     ui.horizontal(|ui| {
                         let label = if preview.playing {
@@ -1534,6 +1640,8 @@ impl FvCaptureApp {
 
         let project = preview.project;
         let output_path = PathBuf::from(self.output_path.trim());
+        let mut encoder = self.config.encoder.clone();
+        encoder.fps = project.fps();
         self.status = StatusKey::Encoding;
         self.encoding_started_at = Some(Instant::now());
         self.error = None;
@@ -1541,7 +1649,7 @@ impl FvCaptureApp {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let result = project
-                .encode_range(start_frame, end_frame, &output_path)
+                .encode_range_with_config(start_frame, end_frame, &encoder, &output_path)
                 .map_err(|error| error.to_string());
             let _ = tx.send((project, result));
         });
@@ -1559,70 +1667,11 @@ impl FvCaptureApp {
 
     fn app_appearance_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.tr(Text::Appearance));
-        let mut changed = false;
-        let ui_font_weight = self.tr(Text::UiFontWeight);
-        let regular = self.tr(Text::Regular);
-        let medium = self.tr(Text::Medium);
-        let bold = self.tr(Text::Bold);
-        egui::ComboBox::from_label(ui_font_weight)
-            .selected_text(self.ui_font_weight_label(self.ui_font_config.weight))
-            .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(
-                        &mut self.ui_font_config.weight,
-                        ui_fonts::UiFontWeight::Regular,
-                        regular,
-                    )
-                    .changed();
-                changed |= ui
-                    .selectable_value(
-                        &mut self.ui_font_config.weight,
-                        ui_fonts::UiFontWeight::Medium,
-                        medium,
-                    )
-                    .changed();
-                changed |= ui
-                    .selectable_value(
-                        &mut self.ui_font_config.weight,
-                        ui_fonts::UiFontWeight::Bold,
-                        bold,
-                    )
-                    .changed();
-            });
-
-        ui.horizontal(|ui| {
-            let label = self
-                .ui_font_config
-                .custom_font_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| self.tr(Text::BundledFont).to_string());
-            ui.label(format!("{}: {label}", self.tr(Text::UiFont)));
-            if ui.button(self.tr(Text::Browse)).clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Font", &["ttf", "otf", "ttc"])
-                    .pick_file()
-            {
-                self.ui_font_config.custom_font_path = Some(path);
-                changed = true;
-            }
-            if ui.button(self.tr(Text::Reset)).clicked() {
-                self.ui_font_config.custom_font_path = None;
-                changed = true;
-            }
-        });
         let shortcut_feedback_sound = self.tr(Text::ShortcutFeedbackSound);
         ui.checkbox(
             &mut self.config.shortcut_feedback_sound,
             shortcut_feedback_sound,
         );
-
-        if changed {
-            match ui_fonts::install(ui.ctx(), &self.ui_font_config) {
-                Ok(()) => self.ui_font_error = None,
-                Err(error) => self.ui_font_error = Some(error),
-            }
-        }
     }
 
     fn language_ui(&mut self, ui: &mut egui::Ui) {
@@ -1682,14 +1731,6 @@ impl FvCaptureApp {
             OverlayLabelFont::Compact => self.tr(Text::Compact),
             OverlayLabelFont::Regular => self.tr(Text::Regular),
             OverlayLabelFont::Bold => self.tr(Text::Bold),
-        }
-    }
-
-    fn ui_font_weight_label(&self, weight: ui_fonts::UiFontWeight) -> &'static str {
-        match weight {
-            ui_fonts::UiFontWeight::Regular => self.tr(Text::Regular),
-            ui_fonts::UiFontWeight::Medium => self.tr(Text::Medium),
-            ui_fonts::UiFontWeight::Bold => self.tr(Text::Bold),
         }
     }
 }
@@ -2026,6 +2067,80 @@ fn load_app_icon() -> Option<egui::IconData> {
     eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/fvCapture.png")).ok()
 }
 
+fn load_status_icon(status: StatusKey) -> Option<egui::IconData> {
+    let mut image = image::load_from_memory(include_bytes!("../../../assets/icons/fvCapture.png"))
+        .ok()?
+        .to_rgba8();
+
+    match status {
+        StatusKey::Recording => {
+            draw_icon_badge(&mut image, Rgba([224, 32, 32, 255]), IconBadgeGlyph::None)
+        }
+        StatusKey::Paused => {
+            draw_icon_badge(&mut image, Rgba([245, 166, 35, 255]), IconBadgeGlyph::Pause)
+        }
+        StatusKey::Ready | StatusKey::Encoding | StatusKey::PreviewReady | StatusKey::Saved => {}
+    }
+
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IconBadgeGlyph {
+    None,
+    Pause,
+}
+
+fn draw_icon_badge(image: &mut RgbaImage, color: Rgba<u8>, glyph: IconBadgeGlyph) {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    let radius = (width.min(height) as f32 * 0.18).round() as i32;
+    let center_x = width - radius - 14;
+    let center_y = height - radius - 14;
+
+    for y in center_y - radius..=center_y + radius {
+        for x in center_x - radius..=center_x + radius {
+            let dx = x - center_x;
+            let dy = y - center_y;
+            if dx * dx + dy * dy <= radius * radius {
+                blend_icon_pixel(image, x, y, color);
+            }
+        }
+    }
+
+    if glyph == IconBadgeGlyph::Pause {
+        let bar_width = (radius as f32 * 0.23).round() as i32;
+        let bar_height = (radius as f32 * 0.95).round() as i32;
+        let gap = (radius as f32 * 0.22).round() as i32;
+        let top = center_y - bar_height / 2;
+        let left = center_x - gap / 2 - bar_width;
+        let right = center_x + gap / 2;
+        let white = Rgba([255, 255, 255, 255]);
+        fill_icon_rect(image, left, top, bar_width, bar_height, white);
+        fill_icon_rect(image, right, top, bar_width, bar_height, white);
+    }
+}
+
+fn fill_icon_rect(image: &mut RgbaImage, x: i32, y: i32, width: i32, height: i32, color: Rgba<u8>) {
+    for py in y..y + height {
+        for px in x..x + width {
+            blend_icon_pixel(image, px, py, color);
+        }
+    }
+}
+
+fn blend_icon_pixel(image: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>) {
+    if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
+        return;
+    }
+    image.put_pixel(x as u32, y as u32, color);
+}
+
 fn open_folder(folder: &Path) -> Result<(), String> {
     let mut command = if cfg!(windows) {
         let mut command = Command::new("explorer");
@@ -2141,6 +2256,59 @@ fn color_control(ui: &mut egui::Ui, label: &str, color: &mut OverlayColor) {
 fn default_output_path(format: OutputFormat) -> PathBuf {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     PathBuf::from(format!("fvCapture-{stamp}.{}", format.extension()))
+}
+
+fn settings_path() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("fvCapture").join("settings.json"))
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("fvCapture")
+                .join("settings.json")
+        })
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .map(|path| path.join("fvCapture").join("settings.json"))
+    }
+}
+
+fn load_saved_settings(path: Option<&Path>) -> (SavedGuiSettings, Option<String>) {
+    let Some(path) = path else {
+        return (
+            SavedGuiSettings::default(),
+            Some("settings folder was not found".to_string()),
+        );
+    };
+    if !path.exists() {
+        return (SavedGuiSettings::default(), None);
+    }
+
+    match std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read settings: {error}"))
+        .and_then(|content| {
+            serde_json::from_str::<SavedGuiSettings>(&content)
+                .map_err(|error| format!("failed to parse settings: {error}"))
+        }) {
+        Ok(settings) => (settings, None),
+        Err(error) => (SavedGuiSettings::default(), Some(error)),
+    }
+}
+
+fn save_saved_settings(path: &Path, settings: &SavedGuiSettings) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create settings folder: {error}"))?;
+    }
+    let content = serde_json::to_string_pretty(settings)
+        .map_err(|error| format!("failed to serialize settings: {error}"))?;
+    std::fs::write(path, content).map_err(|error| format!("failed to write settings: {error}"))
 }
 
 fn format_label(format: OutputFormat) -> &'static str {

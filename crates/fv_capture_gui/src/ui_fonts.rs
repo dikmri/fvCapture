@@ -1,44 +1,12 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use eframe::egui;
 
 const UI_FONT_NAME: &str = "M PLUS 1";
 const UI_FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/MPLUS1.ttf");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UiFontWeight {
-    Regular,
-    Medium,
-    Bold,
-}
-
-impl UiFontWeight {
-    pub fn axis_value(self) -> f32 {
-        match self {
-            Self::Regular => 500.0,
-            Self::Medium => 650.0,
-            Self::Bold => 760.0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UiFontConfig {
-    pub weight: UiFontWeight,
-    pub custom_font_path: Option<PathBuf>,
-}
-
-impl Default for UiFontConfig {
-    fn default() -> Self {
-        Self {
-            weight: UiFontWeight::Medium,
-            custom_font_path: None,
-        }
-    }
-}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UiFontConfig;
 
 pub fn install(ctx: &egui::Context, config: &UiFontConfig) -> Result<(), String> {
     ctx.set_fonts(definitions(config)?);
@@ -47,11 +15,7 @@ pub fn install(ctx: &egui::Context, config: &UiFontConfig) -> Result<(), String>
 
 fn definitions(config: &UiFontConfig) -> Result<egui::FontDefinitions, String> {
     let mut fonts = egui::FontDefinitions::default();
-    let font_data = if let Some(path) = &config.custom_font_path {
-        egui::FontData::from_owned(read_font(path)?)
-    } else {
-        bundled_font_data(config.weight)
-    };
+    let font_data = bundled_font_data(config);
 
     fonts
         .font_data
@@ -67,15 +31,11 @@ fn definitions(config: &UiFontConfig) -> Result<egui::FontDefinitions, String> {
     Ok(fonts)
 }
 
-fn bundled_font_data(weight: UiFontWeight) -> egui::FontData {
+fn bundled_font_data(_config: &UiFontConfig) -> egui::FontData {
     egui::FontData::from_static(UI_FONT_BYTES).tweak(egui::FontTweak {
-        coords: egui::epaint::text::VariationCoords::new([(b"wght", weight.axis_value())]),
+        coords: egui::epaint::text::VariationCoords::new([(b"wght", 650.0)]),
         ..Default::default()
     })
-}
-
-fn read_font(path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|error| format!("failed to read font: {}", error))
 }
 
 #[cfg(test)]
