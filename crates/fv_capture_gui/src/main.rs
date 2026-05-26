@@ -57,7 +57,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             let _ = ui_fonts::install(&cc.egui_ctx, &ui_fonts::UiFontConfig::default());
-            Ok(Box::new(FvCaptureApp::new()))
+            Ok(Box::new(FvCaptureApp::new(cc.egui_ctx.clone())))
         }),
     )
 }
@@ -200,22 +200,39 @@ impl RecordingPreviewState {
 
 struct GlobalShortcutState {
     _manager: GlobalHotKeyManager,
-    start_stop_id: u32,
-    pause_resume_id: u32,
+    action_rx: Receiver<ShortcutAction>,
 }
 
 impl GlobalShortcutState {
-    fn register() -> Result<Self, String> {
+    fn register(ctx: egui::Context) -> Result<Self, String> {
         let manager = GlobalHotKeyManager::new().map_err(|error| error.to_string())?;
         let start_stop = HotKey::new(None, Code::F9);
         let pause_resume = HotKey::new(None, Code::F10);
+        let start_stop_id = start_stop.id();
+        let pause_resume_id = pause_resume.id();
+        let (action_tx, action_rx) = mpsc::channel();
         manager
             .register_all(&[start_stop, pause_resume])
             .map_err(|error| error.to_string())?;
+        GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+            if event.state != HotKeyState::Pressed {
+                return;
+            }
+            let action = if event.id == start_stop_id {
+                Some(ShortcutAction::StartStop)
+            } else if event.id == pause_resume_id {
+                Some(ShortcutAction::PauseResume)
+            } else {
+                None
+            };
+            if let Some(action) = action {
+                let _ = action_tx.send(action);
+                ctx.request_repaint();
+            }
+        }));
         Ok(Self {
             _manager: manager,
-            start_stop_id: start_stop.id(),
-            pause_resume_id: pause_resume.id(),
+            action_rx,
         })
     }
 }
@@ -309,8 +326,8 @@ enum StatusKey {
 }
 
 impl FvCaptureApp {
-    fn new() -> Self {
-        let (global_shortcuts, global_shortcut_error) = match GlobalShortcutState::register() {
+    fn new(ctx: egui::Context) -> Self {
+        let (global_shortcuts, global_shortcut_error) = match GlobalShortcutState::register(ctx) {
             Ok(shortcuts) => (Some(shortcuts), None),
             Err(error) => (None, Some(error)),
         };
@@ -610,19 +627,12 @@ impl FvCaptureApp {
         let Some(shortcuts) = &self.global_shortcuts else {
             return;
         };
-        let start_stop_id = shortcuts.start_stop_id;
-        let pause_resume_id = shortcuts.pause_resume_id;
-        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.state != HotKeyState::Pressed {
-                continue;
-            }
-            let handled = if event.id == start_stop_id {
-                self.handle_shortcut_action(ShortcutAction::StartStop)
-            } else if event.id == pause_resume_id {
-                self.handle_shortcut_action(ShortcutAction::PauseResume)
-            } else {
-                false
-            };
+        let mut actions = Vec::new();
+        while let Ok(action) = shortcuts.action_rx.try_recv() {
+            actions.push(action);
+        }
+        for action in actions {
+            let handled = self.handle_shortcut_action(action);
             if handled && self.config.shortcut_feedback_sound {
                 play_feedback_sound();
             }
@@ -671,16 +681,16 @@ impl FvCaptureApp {
             }
         }
     }
-}
 
-impl eframe::App for FvCaptureApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    fn tick(&mut self, ctx: &egui::Context) {
         self.poll_project();
         self.poll_encoding();
         self.poll_update_check();
         self.poll_global_shortcuts();
-        self.handle_shortcuts(&ctx);
+        self.sync_runtime_state(ctx);
+    }
+
+    fn sync_runtime_state(&mut self, ctx: &egui::Context) {
         if self.active.is_some()
             || self.project_rx.is_some()
             || self.encoding_rx.is_some()
@@ -688,7 +698,19 @@ impl eframe::App for FvCaptureApp {
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
-        self.update_window_icon(&ctx);
+        self.update_window_icon(ctx);
+        self.save_settings_if_changed();
+    }
+}
+
+impl eframe::App for FvCaptureApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.tick(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.handle_shortcuts(&ctx);
 
         egui::Frame::default()
             .inner_margin(egui::Margin::same(8))
@@ -700,7 +722,7 @@ impl eframe::App for FvCaptureApp {
         self.update_dialog_ui(&ctx);
         self.region_selector_viewport(&ctx);
         self.screen_overlay_preview_viewport(&ctx);
-        self.save_settings_if_changed();
+        self.sync_runtime_state(&ctx);
     }
 }
 
