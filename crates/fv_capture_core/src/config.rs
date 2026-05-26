@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::{CaptureConfig, EncoderConfig, OverlaySettings};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct AppConfig {
     pub capture: CaptureConfig,
     pub overlay: OverlaySettings,
     pub encoder: EncoderConfig,
     pub include_recording_panel: bool,
+    pub shortcut_feedback_sound: bool,
 }
 
 impl AppConfig {

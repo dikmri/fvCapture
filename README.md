@@ -44,8 +44,9 @@ GUI:
 3. `操作ラベル` でキーボード/マウス/カーソル表示、ラベル位置、色、表示時間を調整します。
 4. `プレビュー` でラベルの見た目を確認します。`画面上でプレビュー` では実際の画面上に重ねた状態を確認できます。
 5. `出力` で MP4 / GIF / WebM、FPS、サイズ、保存先を選びます。保存先フォルダの指定と、保存先フォルダを開く操作もできます。
-6. `録画開始` で録画開始、`一時停止` / `再開`、`停止` で保存します。アプリ起動中は、fvCapture が非アクティブでも F9 で録画開始/停止、F10 で一時停止/再開できます。
-7. 起動時にアップデートが見つかった場合は、確認ダイアログから更新できます。
+6. `録画開始` で録画開始、`一時停止` / `再開`、`停止` で録画後プレビューを表示します。プレビューでは再生範囲の先頭/末尾ハンドルを調整し、選択範囲だけを動画ファイルとして出力できます。
+7. アプリ起動中は、fvCapture が非アクティブでも F9 で録画開始/停止、F10 で一時停止/再開できます。`表示` からグローバルショートカット操作時の確認音も有効にできます。
+8. 起動時にアップデートが見つかった場合は、確認ダイアログから更新できます。
 
 CLI:
 
@@ -107,8 +108,9 @@ GUI:
 3. In `Overlay`, adjust keyboard, mouse, cursor, label position, colors, and display duration.
 4. Use `Preview` to check the label appearance before recording. `Preview on screen` shows the labels over the actual screen.
 5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`. You can also choose and open the output folder.
-6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. While the app is running, F9 starts/stops recording and F10 pauses/resumes even when fvCapture is not active.
-7. If an update is found at startup, confirm the update dialog to install it.
+6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to open the post-recording preview. In the preview, adjust the start/end handles and export only the selected range.
+7. While the app is running, F9 starts/stops recording and F10 pauses/resumes even when fvCapture is not active. You can enable a feedback sound for global shortcut actions in `Appearance`.
+8. If an update is found at startup, confirm the update dialog to install it.
 
 CLI:
 

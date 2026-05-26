@@ -12,14 +12,15 @@ use eframe::egui;
 use fv_capture_core::{
     ActiveRecording, AppConfig, CaptureBackend, CaptureConfig, CaptureSelection, CaptureSource,
     CaptureWindowSource, KeyCode, LabelPosition, MouseButton, OutputFormat, OutputSize,
-    OverlayColor, OverlayEvent, OverlayEventKind, OverlayLabelFont, OverlayTimeline, Point,
-    RecordingRequest, RecordingSummary, XcapCaptureBackend, capture_origin, composite_frame,
+    OverlayColor, OverlayEvent, OverlayEventKind, OverlayLabelFont, OverlaySettings,
+    OverlayTimeline, Point, RecordingProject, RecordingRequest, RecordingSummary,
+    XcapCaptureBackend, capture_origin, composite_frame,
 };
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey},
 };
-use image::RgbaImage;
+use image::{ImageReader, Rgba, RgbaImage};
 
 mod auto_update;
 mod i18n;
@@ -109,6 +110,89 @@ struct ScreenOverlayPreviewState {
     preview: PreviewImage,
 }
 
+struct RecordingPreviewState {
+    project: RecordingProject,
+    current_frame: usize,
+    trim_start_frame: usize,
+    trim_end_frame: usize,
+    playing: bool,
+    loop_playback: bool,
+    last_advance: Instant,
+    frame_image: Option<PreviewImage>,
+    frame_image_index: Option<usize>,
+}
+
+impl RecordingPreviewState {
+    fn new(project: RecordingProject) -> Self {
+        let trim_end_frame = project.frame_count().saturating_sub(1);
+        Self {
+            project,
+            current_frame: 0,
+            trim_start_frame: 0,
+            trim_end_frame,
+            playing: false,
+            loop_playback: false,
+            last_advance: Instant::now(),
+            frame_image: None,
+            frame_image_index: None,
+        }
+    }
+
+    fn selected_frame_count(&self) -> usize {
+        self.trim_end_frame
+            .saturating_sub(self.trim_start_frame)
+            .saturating_add(1)
+    }
+
+    fn clamp_to_trim(&mut self) {
+        if self.project.frame_count() == 0 {
+            self.current_frame = 0;
+            self.trim_start_frame = 0;
+            self.trim_end_frame = 0;
+            return;
+        }
+
+        let last_frame = self.project.frame_count() - 1;
+        self.trim_start_frame = self.trim_start_frame.min(last_frame);
+        self.trim_end_frame = self
+            .trim_end_frame
+            .min(last_frame)
+            .max(self.trim_start_frame);
+        self.current_frame = self
+            .current_frame
+            .clamp(self.trim_start_frame, self.trim_end_frame);
+    }
+
+    fn update_playback(&mut self, ctx: &egui::Context) {
+        if !self.playing {
+            return;
+        }
+
+        self.clamp_to_trim();
+        let frame_duration = Duration::from_secs_f64(1.0 / self.project.fps().max(1) as f64);
+        let elapsed = self.last_advance.elapsed();
+        if elapsed < frame_duration {
+            ctx.request_repaint_after(frame_duration - elapsed);
+            return;
+        }
+
+        let steps = (elapsed.as_secs_f64() / frame_duration.as_secs_f64())
+            .floor()
+            .max(1.0) as usize;
+        self.last_advance = Instant::now();
+        let next_frame = self.current_frame.saturating_add(steps);
+        if next_frame <= self.trim_end_frame {
+            self.current_frame = next_frame;
+        } else if self.loop_playback {
+            self.current_frame = self.trim_start_frame;
+        } else {
+            self.current_frame = self.trim_end_frame;
+            self.playing = false;
+        }
+        ctx.request_repaint_after(frame_duration);
+    }
+}
+
 struct GlobalShortcutState {
     _manager: GlobalHotKeyManager,
     start_stop_id: u32,
@@ -151,7 +235,8 @@ struct FvCaptureApp {
     region_height: u32,
     output_path: String,
     active: Option<ActiveRecording>,
-    encoding_rx: Option<Receiver<Result<RecordingSummary, String>>>,
+    project_rx: Option<Receiver<Result<RecordingProject, String>>>,
+    encoding_rx: Option<Receiver<(RecordingProject, Result<RecordingSummary, String>)>>,
     encoding_started_at: Option<Instant>,
     global_shortcuts: Option<GlobalShortcutState>,
     global_shortcut_error: Option<String>,
@@ -163,7 +248,9 @@ struct FvCaptureApp {
     window_preview: Option<PreviewImage>,
     window_preview_error: Option<String>,
     region_selector: Option<RegionSelectorState>,
+    region_preview: Option<PreviewImage>,
     screen_overlay_preview: Option<ScreenOverlayPreviewState>,
+    recording_preview: Option<RecordingPreviewState>,
     last_summary: Option<RecordingSummary>,
     status: StatusKey,
     error: Option<String>,
@@ -178,6 +265,7 @@ enum StatusKey {
     Recording,
     Paused,
     Encoding,
+    PreviewReady,
     Saved,
 }
 
@@ -201,6 +289,7 @@ impl FvCaptureApp {
             region_height: 720,
             output_path: default_output_path(OutputFormat::Mp4).display().to_string(),
             active: None,
+            project_rx: None,
             encoding_rx: None,
             encoding_started_at: None,
             global_shortcuts,
@@ -213,7 +302,9 @@ impl FvCaptureApp {
             window_preview: None,
             window_preview_error: None,
             region_selector: None,
+            region_preview: None,
             screen_overlay_preview: None,
+            recording_preview: None,
             last_summary: None,
             status: StatusKey::Ready,
             error: None,
@@ -292,7 +383,7 @@ impl FvCaptureApp {
     }
 
     fn start_recording(&mut self) {
-        if self.active.is_some() || self.encoding_rx.is_some() {
+        if self.active.is_some() || self.project_rx.is_some() || self.encoding_rx.is_some() {
             return;
         }
 
@@ -316,6 +407,7 @@ impl FvCaptureApp {
         };
 
         self.active = Some(ActiveRecording::start(request));
+        self.recording_preview = None;
         self.last_summary = None;
         self.status = StatusKey::Recording;
         self.error = None;
@@ -329,10 +421,10 @@ impl FvCaptureApp {
         self.encoding_started_at = Some(Instant::now());
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let result = active.stop().map_err(|error| error.to_string());
+            let result = active.stop_to_project().map_err(|error| error.to_string());
             let _ = tx.send(result);
         });
-        self.encoding_rx = Some(rx);
+        self.project_rx = Some(rx);
     }
 
     fn update_output_extension(&mut self) {
@@ -342,9 +434,31 @@ impl FvCaptureApp {
         self.output_path = updated.display().to_string();
     }
 
+    fn poll_project(&mut self) {
+        let result = self.project_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        let Some(result) = result else {
+            return;
+        };
+
+        self.project_rx = None;
+        self.encoding_started_at = None;
+        match result {
+            Ok(project) => {
+                self.status = StatusKey::PreviewReady;
+                self.recording_preview = Some(RecordingPreviewState::new(project));
+                self.last_summary = None;
+                self.error = None;
+            }
+            Err(error) => {
+                self.status = StatusKey::Ready;
+                self.error = Some(error);
+            }
+        }
+    }
+
     fn poll_encoding(&mut self) {
         let result = self.encoding_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        let Some(result) = result else {
+        let Some((project, result)) = result else {
             return;
         };
 
@@ -357,7 +471,8 @@ impl FvCaptureApp {
                 self.error = None;
             }
             Err(error) => {
-                self.status = StatusKey::Ready;
+                self.status = StatusKey::PreviewReady;
+                self.recording_preview = Some(RecordingPreviewState::new(project));
                 self.error = Some(error);
             }
         }
@@ -394,10 +509,15 @@ impl FvCaptureApp {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
-            if event.id == start_stop_id {
-                self.handle_shortcut_action(ShortcutAction::StartStop);
+            let handled = if event.id == start_stop_id {
+                self.handle_shortcut_action(ShortcutAction::StartStop)
             } else if event.id == pause_resume_id {
-                self.handle_shortcut_action(ShortcutAction::PauseResume);
+                self.handle_shortcut_action(ShortcutAction::PauseResume)
+            } else {
+                false
+            };
+            if handled && self.config.shortcut_feedback_sound {
+                play_feedback_sound();
             }
         }
     }
@@ -415,13 +535,17 @@ impl FvCaptureApp {
         }
     }
 
-    fn handle_shortcut_action(&mut self, action: ShortcutAction) {
+    fn handle_shortcut_action(&mut self, action: ShortcutAction) -> bool {
         match action {
             ShortcutAction::StartStop => {
                 if self.active.is_some() {
                     self.stop_recording();
-                } else if self.encoding_rx.is_none() {
+                    true
+                } else if self.project_rx.is_none() && self.encoding_rx.is_none() {
                     self.start_recording();
+                    self.active.is_some()
+                } else {
+                    false
                 }
             }
             ShortcutAction::PauseResume => {
@@ -433,6 +557,9 @@ impl FvCaptureApp {
                         active.pause();
                         self.status = StatusKey::Paused;
                     }
+                    true
+                } else {
+                    false
                 }
             }
         }
@@ -442,11 +569,16 @@ impl FvCaptureApp {
 impl eframe::App for FvCaptureApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_project();
         self.poll_encoding();
         self.poll_update_check();
         self.poll_global_shortcuts();
         self.handle_shortcuts(&ctx);
-        if self.active.is_some() || self.encoding_rx.is_some() || self.update_rx.is_some() {
+        if self.active.is_some()
+            || self.project_rx.is_some()
+            || self.encoding_rx.is_some()
+            || self.update_rx.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
@@ -483,8 +615,11 @@ impl FvCaptureApp {
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
             }
         });
+        if self.project_rx.is_some() {
+            self.progress_ui(ui, self.tr(Text::PreparingPreview));
+        }
         if self.encoding_rx.is_some() {
-            self.encoding_progress_ui(ui);
+            self.progress_ui(ui, self.tr(Text::EncodingProgress));
         }
         if self.update_rx.is_some() {
             ui.label(self.tr(Text::UpdateChecking));
@@ -533,6 +668,7 @@ impl FvCaptureApp {
         ui.add_space(8.0);
         ui.separator();
         self.action_ui(ui);
+        self.recording_preview_ui(ui);
     }
 }
 
@@ -610,19 +746,24 @@ impl FvCaptureApp {
 
         if self.source_mode == SourceMode::Region {
             ui.horizontal(|ui| {
-                if ui.button(self.tr(Text::SelectOnScreen)).clicked() {
-                    self.open_region_selector();
+                ui.vertical(|ui| {
+                    if ui.button(self.tr(Text::SelectOnScreen)).clicked() {
+                        self.open_region_selector();
+                    }
+                    ui.label(format!(
+                        "{}: {}, {}  {}: {}  {}: {}",
+                        self.tr(Text::Position),
+                        self.region_x,
+                        self.region_y,
+                        self.tr(Text::Width),
+                        self.region_width,
+                        self.tr(Text::Height),
+                        self.region_height
+                    ));
+                });
+                if let Some(preview) = &mut self.region_preview {
+                    draw_preview_image(ui, preview, egui::vec2(260.0, 160.0));
                 }
-                ui.label(format!(
-                    "{}: {}, {}  {}: {}  {}: {}",
-                    self.tr(Text::Position),
-                    self.region_x,
-                    self.region_y,
-                    self.tr(Text::Width),
-                    self.region_width,
-                    self.tr(Text::Height),
-                    self.region_height
-                ));
             });
         }
     }
@@ -824,10 +965,10 @@ impl FvCaptureApp {
     fn action_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let recording = self.active.is_some();
-            let encoding = self.encoding_rx.is_some();
+            let busy = self.project_rx.is_some() || self.encoding_rx.is_some();
             if ui
                 .add_enabled(
-                    !recording && !encoding,
+                    !recording && !busy,
                     egui::Button::new(format!("{} (F9)", self.tr(Text::StartRecording))),
                 )
                 .clicked()
@@ -876,7 +1017,8 @@ impl FvCaptureApp {
             return;
         };
 
-        let can_update = self.active.is_none() && self.encoding_rx.is_none();
+        let can_update =
+            self.active.is_none() && self.project_rx.is_none() && self.encoding_rx.is_none();
         egui::Window::new(self.tr(Text::UpdateAvailable))
             .collapsible(false)
             .resizable(false)
@@ -1048,6 +1190,7 @@ impl FvCaptureApp {
         };
         match XcapCaptureBackend::capture_once(&config, Instant::now()) {
             Ok(frame) => {
+                self.region_preview = None;
                 self.region_selector = Some(RegionSelectorState {
                     preview: PreviewImage::new(frame.image, (source.x, source.y)),
                     drag_start: None,
@@ -1068,77 +1211,24 @@ impl FvCaptureApp {
         ui.label(self.tr(Text::Preview));
         let desired_size = egui::vec2(ui.available_width().min(500.0), 120.0);
         let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(24, 27, 31));
-        painter.rect_stroke(
+        let image = render_overlay_preview_image(&self.config.overlay, 500, 120);
+        let texture = ui.ctx().load_texture(
+            "overlay_preview_inline",
+            rgba_image_to_color_image(&image),
+            egui::TextureOptions::NEAREST,
+        );
+        ui.painter().image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        ui.painter().rect_stroke(
             rect,
             6.0,
             egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 76, 86)),
             egui::StrokeKind::Outside,
         );
-
-        if self.config.overlay.show_keyboard {
-            let key_bg = color32(self.config.overlay.keyboard_background, 220);
-            let key_text = color32(self.config.overlay.keyboard_text, 255);
-            let key_border = color32(self.config.overlay.keyboard_border, 190);
-            let scale = self.config.overlay.label_scale;
-            let key_h = 30.0 * scale;
-            let labels = ["Ctrl", "Shift", "S"];
-            let widths = [64.0 * scale, 78.0 * scale, 42.0 * scale];
-            let total_width = widths.iter().sum::<f32>() + 8.0 * scale * 2.0;
-            let mut x = rect.center().x - total_width / 2.0;
-            let y = match self.config.overlay.label_position {
-                LabelPosition::BottomCenter => rect.bottom() - key_h - 18.0,
-                LabelPosition::TopCenter => rect.top() + 18.0,
-            };
-            for (label, width) in labels.iter().zip(widths) {
-                let key_rect =
-                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, key_h));
-                painter.rect_filled(key_rect, 5.0, key_bg);
-                painter.rect_stroke(
-                    key_rect,
-                    5.0,
-                    egui::Stroke::new(1.5, key_border),
-                    egui::StrokeKind::Outside,
-                );
-                let font_size = match self.config.overlay.label_font {
-                    OverlayLabelFont::Compact => 13.0,
-                    OverlayLabelFont::Regular => 14.0,
-                    OverlayLabelFont::Bold => 15.0,
-                } * scale;
-                painter.text(
-                    key_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    *label,
-                    egui::FontId::proportional(font_size),
-                    key_text,
-                );
-                x += width + 8.0 * scale;
-            }
-        }
-
-        if self.config.overlay.show_mouse {
-            let center = egui::pos2(rect.left() + 74.0, rect.center().y);
-            painter.circle_stroke(
-                center,
-                24.0,
-                egui::Stroke::new(3.0, color32(self.config.overlay.mouse_primary, 220)),
-            );
-            painter.circle_stroke(
-                center,
-                12.0,
-                egui::Stroke::new(2.0, color32(self.config.overlay.mouse_secondary, 170)),
-            );
-        }
-
-        if self.config.overlay.show_cursor {
-            let pos = egui::pos2(rect.right() - 86.0, rect.center().y - 24.0);
-            draw_egui_cursor(
-                &painter,
-                pos,
-                color32(self.config.overlay.cursor_color, 245),
-            );
-        }
     }
 
     fn open_screen_overlay_preview(&mut self) {
@@ -1168,28 +1258,31 @@ impl FvCaptureApp {
     }
 
     fn region_selector_viewport(&mut self, ctx: &egui::Context) {
-        let Some(state) = &mut self.region_selector else {
-            return;
-        };
-
         let viewport_id = egui::ViewportId::from_hash_of("region_selector");
-        let size = egui::vec2(
-            state.preview.source_size.0.max(320) as f32,
-            state.preview.source_size.1.max(240) as f32,
-        );
-        let position = egui::pos2(state.preview.origin.0 as f32, state.preview.origin.1 as f32);
-        let builder = egui::ViewportBuilder::default()
-            .with_title("fvCapture")
-            .with_position(position)
-            .with_inner_size(size)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_always_on_top();
+        let action = {
+            let Some(state) = &mut self.region_selector else {
+                return;
+            };
 
-        let mut action = RegionSelectorAction::None;
-        ctx.show_viewport_immediate(viewport_id, builder, |ui, _| {
-            action = region_selector_contents(ui, state);
-        });
+            let size = egui::vec2(
+                state.preview.source_size.0.max(320) as f32,
+                state.preview.source_size.1.max(240) as f32,
+            );
+            let position = egui::pos2(state.preview.origin.0 as f32, state.preview.origin.1 as f32);
+            let builder = egui::ViewportBuilder::default()
+                .with_title("fvCapture")
+                .with_position(position)
+                .with_inner_size(size)
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_always_on_top();
+
+            let mut action = RegionSelectorAction::None;
+            ctx.show_viewport_immediate(viewport_id, builder, |ui, _| {
+                action = region_selector_contents(ui, state);
+            });
+            action
+        };
 
         match action {
             RegionSelectorAction::None => {}
@@ -1198,6 +1291,10 @@ impl FvCaptureApp {
                 self.region_selector = None;
             }
             RegionSelectorAction::Apply(x, y, width, height) => {
+                self.region_preview = self
+                    .region_selector
+                    .as_ref()
+                    .map(|state| crop_preview_image(&state.preview, x, y, width, height));
                 self.region_x = x;
                 self.region_y = y;
                 self.region_width = width.max(1);
@@ -1231,7 +1328,11 @@ impl FvCaptureApp {
         let mut close = false;
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _| {
             let rect = ui.max_rect();
-            let response = ui.allocate_rect(rect, egui::Sense::click());
+            let response = ui.interact(
+                rect,
+                ui.id().with("screen_overlay_preview_canvas"),
+                egui::Sense::click(),
+            );
             let texture_id = state.preview.texture_id(ui.ctx(), "screen_overlay_preview");
             ui.painter().image(
                 texture_id,
@@ -1242,13 +1343,15 @@ impl FvCaptureApp {
             if ui.input(|input| input.key_pressed(egui::Key::Escape)) || response.double_clicked() {
                 close = true;
             }
-            egui::Area::new("screen_overlay_preview_actions".into())
-                .fixed_pos(rect.left_top() + egui::vec2(16.0, 16.0))
-                .show(ui.ctx(), |ui| {
-                    if ui.button(close_preview).clicked() {
-                        close = true;
-                    }
-                });
+            let button_size = egui::vec2(180.0, 32.0);
+            let button_rect =
+                egui::Rect::from_min_size(rect.left_top() + egui::vec2(16.0, 16.0), button_size);
+            if ui
+                .put(button_rect, egui::Button::new(close_preview))
+                .clicked()
+            {
+                close = true;
+            }
         });
         if close {
             ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
@@ -1256,17 +1359,202 @@ impl FvCaptureApp {
         }
     }
 
-    fn encoding_progress_ui(&self, ui: &mut egui::Ui) {
+    fn recording_preview_ui(&mut self, ui: &mut egui::Ui) {
+        if self.recording_preview.is_none() {
+            return;
+        }
+
+        let recording_preview = self.tr(Text::RecordingPreview);
+        let play_preview = self.tr(Text::PlayPreview);
+        let pause_preview = self.tr(Text::PausePreview);
+        let loop_playback = self.tr(Text::LoopPlayback);
+        let remove_first_frames = self.tr(Text::RemoveFirstFrames);
+        let remove_last_frames = self.tr(Text::RemoveLastFrames);
+        let trim_start_frame = self.tr(Text::TrimStartFrame);
+        let trim_end_frame = self.tr(Text::TrimEndFrame);
+        let export_selected_range = self.tr(Text::ExportSelectedRange);
+        let frames_label = self.tr(Text::Frames);
+        let output = self.tr(Text::Output);
+        let can_export = self.encoding_rx.is_none();
+
+        let mut export_request = None;
+        let mut load_error = None;
+
+        ui.add_space(8.0);
+        ui.separator();
+
+        {
+            let Some(preview) = &mut self.recording_preview else {
+                return;
+            };
+            preview.update_playback(ui.ctx());
+            preview.clamp_to_trim();
+
+            let total_frames = preview.project.frame_count();
+            let mut remove_first = preview.trim_start_frame;
+            let mut remove_last = total_frames
+                .saturating_sub(1)
+                .saturating_sub(preview.trim_end_frame);
+
+            ui.heading(recording_preview);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    if preview.frame_image_index != Some(preview.current_frame) {
+                        match load_project_frame(&preview.project, preview.current_frame) {
+                            Ok(image) => {
+                                preview.frame_image = Some(image);
+                                preview.frame_image_index = Some(preview.current_frame);
+                            }
+                            Err(error) => {
+                                load_error = Some(error);
+                            }
+                        }
+                    }
+
+                    if let Some(image) = &mut preview.frame_image {
+                        draw_preview_image(
+                            ui,
+                            image,
+                            egui::vec2(ui.available_width().min(520.0), 300.0),
+                        );
+                    }
+
+                    let timeline_changed = trim_timeline_ui(
+                        ui,
+                        total_frames,
+                        &mut preview.current_frame,
+                        &mut preview.trim_start_frame,
+                        &mut preview.trim_end_frame,
+                    );
+                    if timeline_changed {
+                        preview.clamp_to_trim();
+                    }
+                });
+
+                ui.vertical(|ui| {
+                    ui.label(format!(
+                        "{}: {} / {} {}",
+                        frames_label,
+                        preview.selected_frame_count(),
+                        total_frames,
+                        frames_label
+                    ));
+                    ui.label(format!(
+                        "{}: {}",
+                        output,
+                        preview.project.output_path().display()
+                    ));
+
+                    ui.horizontal(|ui| {
+                        let label = if preview.playing {
+                            pause_preview
+                        } else {
+                            play_preview
+                        };
+                        if ui.button(label).clicked() {
+                            preview.playing = !preview.playing;
+                            preview.last_advance = Instant::now();
+                            preview.clamp_to_trim();
+                        }
+                        ui.checkbox(&mut preview.loop_playback, loop_playback);
+                    });
+
+                    ui.add(
+                        egui::Slider::new(
+                            &mut preview.current_frame,
+                            preview.trim_start_frame..=preview.trim_end_frame,
+                        )
+                        .text(frames_label),
+                    );
+
+                    ui.horizontal(|ui| {
+                        ui.label(remove_first_frames);
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut remove_first)
+                                    .range(0..=total_frames.saturating_sub(1))
+                                    .speed(1),
+                            )
+                            .changed()
+                        {
+                            preview.trim_start_frame = remove_first.min(preview.trim_end_frame);
+                            preview.clamp_to_trim();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(remove_last_frames);
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut remove_last)
+                                    .range(0..=total_frames.saturating_sub(1))
+                                    .speed(1),
+                            )
+                            .changed()
+                        {
+                            let last_frame = total_frames.saturating_sub(1);
+                            preview.trim_end_frame = last_frame
+                                .saturating_sub(remove_last)
+                                .max(preview.trim_start_frame);
+                            preview.clamp_to_trim();
+                        }
+                    });
+                    ui.label(format!(
+                        "{}: {}  {}: {}",
+                        trim_start_frame,
+                        preview.trim_start_frame,
+                        trim_end_frame,
+                        preview.trim_end_frame
+                    ));
+
+                    if ui
+                        .add_enabled(can_export, egui::Button::new(export_selected_range))
+                        .clicked()
+                    {
+                        export_request = Some((preview.trim_start_frame, preview.trim_end_frame));
+                    }
+                });
+            });
+        }
+
+        if let Some(error) = load_error {
+            self.error = Some(error);
+        }
+        if let Some((start_frame, end_frame)) = export_request {
+            self.export_recording_preview(start_frame, end_frame);
+        }
+    }
+
+    fn export_recording_preview(&mut self, start_frame: usize, end_frame: usize) {
+        if self.encoding_rx.is_some() {
+            return;
+        }
+        let Some(preview) = self.recording_preview.take() else {
+            return;
+        };
+
+        let project = preview.project;
+        let output_path = PathBuf::from(self.output_path.trim());
+        self.status = StatusKey::Encoding;
+        self.encoding_started_at = Some(Instant::now());
+        self.error = None;
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = project
+                .encode_range(start_frame, end_frame, &output_path)
+                .map_err(|error| error.to_string());
+            let _ = tx.send((project, result));
+        });
+        self.encoding_rx = Some(rx);
+    }
+
+    fn progress_ui(&self, ui: &mut egui::Ui, text: &str) {
         let elapsed = self
             .encoding_started_at
             .map(|started| started.elapsed().as_secs_f32())
             .unwrap_or_default();
         let progress = (elapsed * 0.8).sin() * 0.5 + 0.5;
-        ui.add(
-            egui::ProgressBar::new(progress)
-                .animate(true)
-                .text(self.tr(Text::EncodingProgress)),
-        );
+        ui.add(egui::ProgressBar::new(progress).animate(true).text(text));
     }
 
     fn app_appearance_ui(&mut self, ui: &mut egui::Ui) {
@@ -1323,6 +1611,11 @@ impl FvCaptureApp {
                 changed = true;
             }
         });
+        let shortcut_feedback_sound = self.tr(Text::ShortcutFeedbackSound);
+        ui.checkbox(
+            &mut self.config.shortcut_feedback_sound,
+            shortcut_feedback_sound,
+        );
 
         if changed {
             match ui_fonts::install(ui.ctx(), &self.ui_font_config) {
@@ -1356,6 +1649,7 @@ impl FvCaptureApp {
             StatusKey::Recording => self.tr(Text::Recording),
             StatusKey::Paused => self.tr(Text::Paused),
             StatusKey::Encoding => self.tr(Text::Encoding),
+            StatusKey::PreviewReady => self.tr(Text::PreviewReady),
             StatusKey::Saved => self.tr(Text::Saved),
         }
     }
@@ -1432,7 +1726,7 @@ fn region_selector_contents(
         return RegionSelectorAction::Cancel;
     }
 
-    if (response.drag_started() || response.clicked())
+    if response.drag_started()
         && let Some(pos) = response.interact_pointer_pos()
     {
         let point = preview_to_source(rect, state.preview.source_size, pos);
@@ -1458,6 +1752,9 @@ fn region_selector_contents(
 
     if response.drag_stopped() {
         state.drag_start = None;
+        if let Some((x, y, width, height)) = state.selection {
+            return RegionSelectorAction::Apply(x, y, width, height);
+        }
     }
 
     if let Some((x, y, width, height)) = state.selection {
@@ -1471,20 +1768,7 @@ fn region_selector_contents(
             egui::Stroke::new(2.0, egui::Color32::from_rgb(57, 255, 210)),
             egui::StrokeKind::Outside,
         );
-        let mut action = RegionSelectorAction::None;
-        egui::Area::new("region_selector_actions".into())
-            .fixed_pos(selected_rect.left_top() + egui::vec2(12.0, 12.0))
-            .show(ui.ctx(), |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        action = RegionSelectorAction::Apply(x, y, width, height);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        action = RegionSelectorAction::Cancel;
-                    }
-                });
-            });
-        return action;
+        return RegionSelectorAction::None;
     }
 
     draw_dim_outside(&painter, rect, egui::Rect::NOTHING);
@@ -1545,6 +1829,164 @@ fn draw_preview_image(ui: &mut egui::Ui, preview: &mut PreviewImage, max_size: e
     );
 }
 
+fn crop_preview_image(
+    preview: &PreviewImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> PreviewImage {
+    let source_width = preview.source_size.0 as usize;
+    let source_height = preview.source_size.1 as usize;
+    let x = (x as usize).min(source_width.saturating_sub(1));
+    let y = (y as usize).min(source_height.saturating_sub(1));
+    let width = (width as usize).min(source_width.saturating_sub(x)).max(1);
+    let height = (height as usize)
+        .min(source_height.saturating_sub(y))
+        .max(1);
+    let mut pixels = Vec::with_capacity(width * height);
+    for row in y..y + height {
+        let start = row * source_width + x;
+        pixels.extend_from_slice(&preview.image.pixels[start..start + width]);
+    }
+
+    PreviewImage {
+        image: egui::ColorImage::new([width, height], pixels),
+        texture: None,
+        origin: (preview.origin.0 + x as i32, preview.origin.1 + y as i32),
+        source_size: (width as u32, height as u32),
+    }
+}
+
+fn load_project_frame(
+    project: &RecordingProject,
+    frame_index: usize,
+) -> Result<PreviewImage, String> {
+    let path = project.frame_path(frame_index);
+    let image = ImageReader::open(&path)
+        .map_err(|error| format!("failed to open preview frame: {error}"))?
+        .decode()
+        .map_err(|error| format!("failed to decode preview frame: {error}"))?
+        .to_rgba8();
+    Ok(PreviewImage::new(image, (0, 0)))
+}
+
+fn trim_timeline_ui(
+    ui: &mut egui::Ui,
+    total_frames: usize,
+    current_frame: &mut usize,
+    trim_start_frame: &mut usize,
+    trim_end_frame: &mut usize,
+) -> bool {
+    if total_frames == 0 {
+        return false;
+    }
+
+    let desired_size = egui::vec2(ui.available_width().min(520.0), 42.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.center().y - 4.0),
+        egui::pos2(rect.right(), rect.center().y + 4.0),
+    );
+    let last_frame = total_frames - 1;
+    let frame_to_x = |frame: usize| {
+        let t = if last_frame == 0 {
+            0.0
+        } else {
+            frame as f32 / last_frame as f32
+        };
+        egui::lerp(bar.left()..=bar.right(), t)
+    };
+    let x_to_frame = |x: f32| {
+        let t = ((x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0);
+        (t * last_frame as f32).round() as usize
+    };
+
+    let mut changed = false;
+    *trim_start_frame = (*trim_start_frame).min(last_frame);
+    *trim_end_frame = (*trim_end_frame).min(last_frame).max(*trim_start_frame);
+    *current_frame = (*current_frame).clamp(*trim_start_frame, *trim_end_frame);
+
+    if response.clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        *current_frame = x_to_frame(pos.x).clamp(*trim_start_frame, *trim_end_frame);
+        changed = true;
+    }
+
+    let start_x = frame_to_x(*trim_start_frame);
+    let end_x = frame_to_x(*trim_end_frame);
+    let current_x = frame_to_x(*current_frame);
+    let selected_bar = egui::Rect::from_min_max(
+        egui::pos2(start_x, bar.top()),
+        egui::pos2(end_x, bar.bottom()),
+    );
+    painter.rect_filled(bar, 3.0, egui::Color32::from_rgb(58, 64, 72));
+    painter.rect_filled(selected_bar, 3.0, egui::Color32::from_rgb(57, 255, 210));
+    painter.line_segment(
+        [
+            egui::pos2(current_x, rect.top() + 6.0),
+            egui::pos2(current_x, rect.bottom() - 6.0),
+        ],
+        egui::Stroke::new(2.0, egui::Color32::WHITE),
+    );
+
+    let handle_size = egui::vec2(12.0, 30.0);
+    let start_rect =
+        egui::Rect::from_center_size(egui::pos2(start_x, rect.center().y), handle_size);
+    let end_rect = egui::Rect::from_center_size(egui::pos2(end_x, rect.center().y), handle_size);
+    let start_response = ui.interact(
+        start_rect,
+        ui.id().with("trim_start_handle"),
+        egui::Sense::drag(),
+    );
+    let end_response = ui.interact(
+        end_rect,
+        ui.id().with("trim_end_handle"),
+        egui::Sense::drag(),
+    );
+
+    if start_response.dragged()
+        && let Some(pos) = start_response.interact_pointer_pos()
+    {
+        *trim_start_frame = x_to_frame(pos.x).min(*trim_end_frame);
+        *current_frame = (*current_frame).max(*trim_start_frame);
+        changed = true;
+    }
+    if end_response.dragged()
+        && let Some(pos) = end_response.interact_pointer_pos()
+    {
+        *trim_end_frame = x_to_frame(pos.x).max(*trim_start_frame);
+        *current_frame = (*current_frame).min(*trim_end_frame);
+        changed = true;
+    }
+
+    painter.rect_filled(start_rect, 3.0, egui::Color32::from_rgb(245, 247, 250));
+    painter.rect_filled(end_rect, 3.0, egui::Color32::from_rgb(245, 247, 250));
+    painter.rect_stroke(
+        start_rect,
+        3.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(25, 31, 36)),
+        egui::StrokeKind::Outside,
+    );
+    painter.rect_stroke(
+        end_rect,
+        3.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(25, 31, 36)),
+        egui::StrokeKind::Outside,
+    );
+
+    changed
+}
+
+fn render_overlay_preview_image(settings: &OverlaySettings, width: u32, height: u32) -> RgbaImage {
+    let mut image = RgbaImage::from_pixel(width, height, Rgba([24, 27, 31, 255]));
+    let timeline = preview_timeline(width, height);
+    composite_frame(&mut image, &timeline, 100, settings);
+    image
+}
+
 fn preview_timeline(width: u32, height: u32) -> OverlayTimeline {
     let x = width as f64 * 0.72;
     let y = height as f64 * 0.45;
@@ -1571,38 +2013,6 @@ fn preview_timeline(width: u32, height: u32) -> OverlayTimeline {
         ],
         mouse_positions: vec![(0, Point { x, y })],
     }
-}
-
-fn draw_egui_cursor(painter: &egui::Painter, pos: egui::Pos2, fill: egui::Color32) {
-    let outline = egui::Color32::from_rgb(3, 8, 12);
-    let outer = [
-        egui::pos2(pos.x, pos.y),
-        egui::pos2(pos.x, pos.y + 29.0),
-        egui::pos2(pos.x + 8.0, pos.y + 21.0),
-        egui::pos2(pos.x + 13.0, pos.y + 33.0),
-        egui::pos2(pos.x + 18.0, pos.y + 31.0),
-        egui::pos2(pos.x + 13.0, pos.y + 19.0),
-        egui::pos2(pos.x + 24.0, pos.y + 19.0),
-    ];
-    let inner = [
-        egui::pos2(pos.x + 3.0, pos.y + 7.0),
-        egui::pos2(pos.x + 3.0, pos.y + 22.0),
-        egui::pos2(pos.x + 9.0, pos.y + 16.0),
-        egui::pos2(pos.x + 14.0, pos.y + 28.0),
-        egui::pos2(pos.x + 15.0, pos.y + 27.0),
-        egui::pos2(pos.x + 10.0, pos.y + 15.0),
-        egui::pos2(pos.x + 18.0, pos.y + 16.0),
-    ];
-    painter.add(egui::Shape::convex_polygon(
-        outer.to_vec(),
-        outline,
-        egui::Stroke::NONE,
-    ));
-    painter.add(egui::Shape::convex_polygon(
-        inner.to_vec(),
-        fill,
-        egui::Stroke::NONE,
-    ));
 }
 
 fn rgba_image_to_color_image(image: &RgbaImage) -> egui::ColorImage {
@@ -1645,6 +2055,22 @@ fn suppress_console_window(command: &mut Command) {
 
 #[cfg(not(windows))]
 fn suppress_console_window(_command: &mut Command) {}
+
+#[cfg(windows)]
+fn play_feedback_sound() {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBeep(u_type: u32) -> i32;
+    }
+
+    const MB_ICONASTERISK: u32 = 0x0000_0040;
+    unsafe {
+        let _ = MessageBeep(MB_ICONASTERISK);
+    }
+}
+
+#[cfg(not(windows))]
+fn play_feedback_sound() {}
 
 fn preview_to_source(rect: egui::Rect, source_size: (u32, u32), pos: egui::Pos2) -> (u32, u32) {
     let local = (pos - rect.min).clamp(egui::Vec2::ZERO, rect.size());
@@ -1710,10 +2136,6 @@ fn color_control(ui: &mut egui::Ui, label: &str, color: &mut OverlayColor) {
         color.b = ui_color.b();
     }
     ui.end_row();
-}
-
-fn color32(color: OverlayColor, alpha: u8) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(color.r, color.g, color.b, alpha)
 }
 
 fn default_output_path(format: OutputFormat) -> PathBuf {

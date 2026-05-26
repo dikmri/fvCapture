@@ -38,8 +38,9 @@ GUI:
 3. In `Overlay`, adjust keyboard, mouse, cursor, label position, colors, and display duration.
 4. Use `Preview` to check the label appearance before recording. `Preview on screen` shows the labels over the actual screen.
 5. Choose MP4 / GIF / WebM, FPS, size, and destination in `Output`. You can also choose and open the output folder.
-6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to save the recording. While the app is running, F9 starts/stops recording and F10 pauses/resumes even when fvCapture is not active.
-7. If an update is found at startup, confirm the update dialog to install it.
+6. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to open the post-recording preview. In the preview, adjust the start/end handles and export only the selected range.
+7. While the app is running, F9 starts/stops recording and F10 pauses/resumes even when fvCapture is not active. You can enable a feedback sound for global shortcut actions in `Appearance`.
+8. If an update is found at startup, confirm the update dialog to install it.
 
 CLI:
 

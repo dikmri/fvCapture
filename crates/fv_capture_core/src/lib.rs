@@ -18,4 +18,7 @@ pub use overlay::{
     LabelPosition, OverlayColor, OverlayEvent, OverlayEventKind, OverlayLabelFont, OverlaySettings,
     OverlayTimeline, Point, composite_frame,
 };
-pub use project::{ActiveRecording, RecordingRequest, RecordingSummary, record_blocking};
+pub use project::{
+    ActiveRecording, RecordingProject, RecordingRequest, RecordingSummary, record_blocking,
+    record_to_project_blocking,
+};

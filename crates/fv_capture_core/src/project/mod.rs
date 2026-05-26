@@ -17,7 +17,7 @@ use crate::{
     CaptureConfig,
     capture::XcapCaptureBackend,
     capture_origin,
-    encoder::{EncoderConfig, encode_png_sequence},
+    encoder::{EncoderConfig, encode_png_sequence_range},
     input::{InputBackend, InputEvent, PollingInputBackend},
     overlay::{OverlaySettings, OverlayTimeline, composite_frame},
 };
@@ -40,6 +40,76 @@ pub struct RecordingSummary {
 }
 
 #[derive(Debug)]
+pub struct RecordingProject {
+    _temp: TempDir,
+    frame_dir: PathBuf,
+    frame_count: usize,
+    captured_frames: usize,
+    duration_ms: u64,
+    encoder: EncoderConfig,
+    output_path: PathBuf,
+}
+
+impl RecordingProject {
+    pub fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+
+    pub fn captured_frames(&self) -> usize {
+        self.captured_frames
+    }
+
+    pub fn duration_ms(&self) -> u64 {
+        self.duration_ms
+    }
+
+    pub fn fps(&self) -> u32 {
+        self.encoder.normalized_fps()
+    }
+
+    pub fn output_path(&self) -> &Path {
+        &self.output_path
+    }
+
+    pub fn frame_path(&self, frame_index: usize) -> PathBuf {
+        self.frame_dir.join(format!("frame_{frame_index:06}.png"))
+    }
+
+    pub fn encode_range(
+        &self,
+        start_frame: usize,
+        end_frame: usize,
+        output_path: &Path,
+    ) -> Result<RecordingSummary> {
+        if self.frame_count == 0 {
+            return Err(anyhow!("cannot encode an empty recording"));
+        }
+
+        let start_frame = start_frame.min(self.frame_count - 1);
+        let end_frame = end_frame.min(self.frame_count - 1).max(start_frame);
+        let frame_count = end_frame - start_frame + 1;
+        let report = encode_png_sequence_range(
+            &self.frame_dir,
+            start_frame,
+            frame_count,
+            &self.encoder,
+            output_path,
+        )?;
+
+        Ok(RecordingSummary {
+            output_path: report.output_path,
+            captured_frames: self.captured_frames,
+            encoded_frames: report.frame_count,
+            duration_ms: self.duration_ms,
+        })
+    }
+
+    pub fn encode_full(&self, output_path: &Path) -> Result<RecordingSummary> {
+        self.encode_range(0, self.frame_count.saturating_sub(1), output_path)
+    }
+}
+
+#[derive(Debug)]
 struct FrameRecord {
     path: PathBuf,
     timestamp_ms: u64,
@@ -49,7 +119,7 @@ struct FrameRecord {
 pub struct ActiveRecording {
     stop: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
-    handle: Option<JoinHandle<Result<RecordingSummary>>>,
+    handle: Option<JoinHandle<Result<RecordingProject>>>,
 }
 
 impl ActiveRecording {
@@ -58,7 +128,8 @@ impl ActiveRecording {
         let pause = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker_pause = Arc::clone(&pause);
-        let handle = thread::spawn(move || record_blocking(request, worker_stop, worker_pause));
+        let handle =
+            thread::spawn(move || record_to_project_blocking(request, worker_stop, worker_pause));
 
         Self {
             stop,
@@ -79,7 +150,13 @@ impl ActiveRecording {
         self.pause.load(Ordering::SeqCst)
     }
 
-    pub fn stop(mut self) -> Result<RecordingSummary> {
+    pub fn stop(self) -> Result<RecordingSummary> {
+        let project = self.stop_to_project()?;
+        let output_path = project.output_path().to_path_buf();
+        project.encode_full(&output_path)
+    }
+
+    pub fn stop_to_project(mut self) -> Result<RecordingProject> {
         self.stop.store(true, Ordering::SeqCst);
         let handle = self
             .handle
@@ -105,6 +182,16 @@ pub fn record_blocking(
     stop: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
 ) -> Result<RecordingSummary> {
+    let project = record_to_project_blocking(request, stop, pause)?;
+    let output_path = project.output_path().to_path_buf();
+    project.encode_full(&output_path)
+}
+
+pub fn record_to_project_blocking(
+    request: RecordingRequest,
+    stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
+) -> Result<RecordingProject> {
     request.capture.validate()?;
 
     let temp = TempDir::new().context("failed to create temporary recording directory")?;
@@ -182,19 +269,26 @@ pub fn record_blocking(
         &composed_dir,
     )?;
 
-    let report = encode_png_sequence(
-        &composed_dir,
-        encoded_frames,
-        &request.encoder,
-        &request.output_path,
-    )?;
-
-    Ok(RecordingSummary {
-        output_path: report.output_path,
+    Ok(RecordingProject {
+        _temp: temp,
+        frame_dir: composed_dir,
+        frame_count: encoded_frames,
         captured_frames: frames.len(),
-        encoded_frames: report.frame_count,
         duration_ms: started_at.elapsed().as_millis() as u64,
+        encoder: request.encoder,
+        output_path: request.output_path,
     })
+}
+
+impl From<&RecordingProject> for RecordingSummary {
+    fn from(project: &RecordingProject) -> Self {
+        Self {
+            output_path: project.output_path.clone(),
+            captured_frames: project.captured_frames,
+            encoded_frames: project.frame_count,
+            duration_ms: project.duration_ms,
+        }
+    }
 }
 
 fn compose_frames(

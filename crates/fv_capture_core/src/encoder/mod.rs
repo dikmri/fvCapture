@@ -73,6 +73,16 @@ pub fn encode_png_sequence(
     config: &EncoderConfig,
     output_path: &Path,
 ) -> Result<EncodeReport> {
+    encode_png_sequence_range(frame_dir, 0, frame_count, config, output_path)
+}
+
+pub fn encode_png_sequence_range(
+    frame_dir: &Path,
+    start_frame: usize,
+    frame_count: usize,
+    config: &EncoderConfig,
+    output_path: &Path,
+) -> Result<EncodeReport> {
     if frame_count == 0 {
         return Err(anyhow!("cannot encode an empty frame sequence"));
     }
@@ -83,7 +93,13 @@ pub fn encode_png_sequence(
     }
 
     let pattern = frame_dir.join("frame_%06d.png");
-    let args = build_ffmpeg_args(&pattern, config, output_path);
+    let args = build_ffmpeg_args(
+        &pattern,
+        start_frame,
+        Some(frame_count),
+        config,
+        output_path,
+    );
     tracing::info!(?args, "starting ffmpeg encode");
     let mut command = Command::new(ffmpeg_binary());
     command.args(&args);
@@ -106,6 +122,8 @@ pub fn encode_png_sequence(
 
 pub fn build_ffmpeg_args(
     input_pattern: &Path,
+    start_frame: usize,
+    frame_count: Option<usize>,
     config: &EncoderConfig,
     output_path: &Path,
 ) -> Vec<String> {
@@ -118,16 +136,17 @@ pub fn build_ffmpeg_args(
         "-framerate".to_string(),
         fps.clone(),
         "-start_number".to_string(),
-        "0".to_string(),
+        start_frame.to_string(),
         "-i".to_string(),
         input_pattern.to_string_lossy().to_string(),
     ];
+    if let Some(frame_count) = frame_count {
+        args.extend(["-frames:v".to_string(), frame_count.to_string()]);
+    }
 
     match config.format {
         OutputFormat::Mp4 => {
-            if let Some(filter) = video_filter(config) {
-                args.extend(["-vf".to_string(), filter]);
-            }
+            args.extend(["-vf".to_string(), video_filter(config)]);
             args.extend([
                 "-an".to_string(),
                 "-c:v".to_string(),
@@ -149,9 +168,7 @@ pub fn build_ffmpeg_args(
             ]);
         }
         OutputFormat::WebM => {
-            if let Some(filter) = video_filter(config) {
-                args.extend(["-vf".to_string(), filter]);
-            }
+            args.extend(["-vf".to_string(), video_filter(config)]);
             args.extend([
                 "-an".to_string(),
                 "-c:v".to_string(),
@@ -181,11 +198,11 @@ fn suppress_console_window(command: &mut Command) {
 #[cfg(not(windows))]
 fn suppress_console_window(_command: &mut Command) {}
 
-fn video_filter(config: &EncoderConfig) -> Option<String> {
+fn video_filter(config: &EncoderConfig) -> String {
     match config.size {
-        OutputSize::Original => None,
-        OutputSize::P720 => Some("scale=720:-2:flags=lanczos".to_string()),
-        OutputSize::P480 => Some("scale=480:-2:flags=lanczos".to_string()),
+        OutputSize::Original => "pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0:color=black".to_string(),
+        OutputSize::P720 => "scale=720:-2:flags=lanczos".to_string(),
+        OutputSize::P480 => "scale=480:-2:flags=lanczos".to_string(),
     }
 }
 
@@ -243,6 +260,8 @@ mod tests {
         };
         let args = build_ffmpeg_args(
             Path::new("frames/frame_%06d.png"),
+            0,
+            Some(10),
             &config,
             Path::new("out.mp4"),
         );
@@ -250,6 +269,8 @@ mod tests {
         assert!(args.contains(&"libx264".to_string()));
         assert!(args.contains(&"-an".to_string()));
         assert!(args.contains(&"yuv420p".to_string()));
+        assert!(args.contains(&"pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0:color=black".to_string()));
+        assert!(args.contains(&"-frames:v".to_string()));
     }
 
     #[test]
@@ -262,6 +283,8 @@ mod tests {
         };
         let args = build_ffmpeg_args(
             Path::new("frames/frame_%06d.png"),
+            0,
+            Some(10),
             &config,
             Path::new("out.gif"),
         );
@@ -274,6 +297,20 @@ mod tests {
         assert!(vf.contains("palettegen"));
         assert!(vf.contains("fps=10"));
         assert!(vf.contains("scale=720"));
+    }
+
+    #[test]
+    fn command_can_start_from_trimmed_frame() {
+        let args = build_ffmpeg_args(
+            Path::new("frames/frame_%06d.png"),
+            12,
+            Some(34),
+            &EncoderConfig::default(),
+            Path::new("out.mp4"),
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-start_number", "12"]));
+        assert!(args.windows(2).any(|pair| pair == ["-frames:v", "34"]));
     }
 
     #[test]
