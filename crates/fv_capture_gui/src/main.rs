@@ -24,6 +24,8 @@ use global_hotkey::{
     hotkey::{Code, HotKey},
 };
 use image::{ImageReader, Rgba, RgbaImage};
+#[cfg(windows)]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde::{Deserialize, Serialize};
 
 mod auto_update;
@@ -57,9 +59,35 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             let _ = ui_fonts::install(&cc.egui_ctx, &ui_fonts::UiFontConfig::default());
-            Ok(Box::new(FvCaptureApp::new(cc.egui_ctx.clone())))
+            Ok(Box::new(FvCaptureApp::new(
+                cc.egui_ctx.clone(),
+                native_window_handle(cc),
+            )))
         }),
     )
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NativeWindowHandle {
+    #[cfg(windows)]
+    hwnd: Option<isize>,
+}
+
+#[cfg(windows)]
+fn native_window_handle(cc: &eframe::CreationContext<'_>) -> NativeWindowHandle {
+    let hwnd = cc
+        .window_handle()
+        .ok()
+        .and_then(|handle| match handle.as_raw() {
+            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+            _ => None,
+        });
+    NativeWindowHandle { hwnd }
+}
+
+#[cfg(not(windows))]
+fn native_window_handle(_cc: &eframe::CreationContext<'_>) -> NativeWindowHandle {
+    NativeWindowHandle::default()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +102,7 @@ enum SourceMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppTab {
     Capture,
+    Preview,
     Overlay,
     Appearance,
 }
@@ -290,7 +319,7 @@ struct FvCaptureApp {
     output_path: String,
     active: Option<ActiveRecording>,
     project_rx: Option<Receiver<Result<RecordingProject, String>>>,
-    encoding_rx: Option<Receiver<(RecordingProject, Result<RecordingSummary, String>)>>,
+    encoding_rx: Option<Receiver<Result<RecordingSummary, String>>>,
     encoding_started_at: Option<Instant>,
     global_shortcuts: Option<GlobalShortcutState>,
     global_shortcut_error: Option<String>,
@@ -313,6 +342,8 @@ struct FvCaptureApp {
     last_saved_settings: SavedGuiSettings,
     settings_error: Option<String>,
     last_icon_status: Option<StatusKey>,
+    native_window: NativeWindowHandle,
+    activate_window_frames: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,20 +357,19 @@ enum StatusKey {
 }
 
 impl FvCaptureApp {
-    fn new(ctx: egui::Context) -> Self {
+    fn new(ctx: egui::Context, native_window: NativeWindowHandle) -> Self {
         let (global_shortcuts, global_shortcut_error) = match GlobalShortcutState::register(ctx) {
             Ok(shortcuts) => (Some(shortcuts), None),
             Err(error) => (None, Some(error)),
         };
         let settings_path = settings_path();
         let (saved_settings, settings_error) = load_saved_settings(settings_path.as_deref());
-        let output_path = if saved_settings.output_path.trim().is_empty() {
-            default_output_path(saved_settings.config.encoder.format)
-                .display()
-                .to_string()
-        } else {
-            saved_settings.output_path.clone()
-        };
+        let output_path = resolve_output_path(
+            &saved_settings.output_path,
+            saved_settings.config.encoder.format,
+        )
+        .display()
+        .to_string();
         let mut app = Self {
             config: saved_settings.config.clone(),
             active_tab: AppTab::Capture,
@@ -378,6 +408,8 @@ impl FvCaptureApp {
             last_saved_settings: saved_settings,
             settings_error,
             last_icon_status: None,
+            native_window,
+            activate_window_frames: 0,
         };
         app.refresh_sources();
         app.last_saved_settings = app.saved_settings_snapshot();
@@ -501,6 +533,7 @@ impl FvCaptureApp {
             return;
         }
         if let Some(icon) = load_status_icon(self.status) {
+            set_native_window_icon(self.native_window, &icon);
             ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(icon))));
             self.last_icon_status = Some(self.status);
         }
@@ -511,7 +544,6 @@ impl FvCaptureApp {
             return;
         }
 
-        let output_path = PathBuf::from(self.output_path.trim());
         let selection = match self.current_selection() {
             Ok(selection) => selection,
             Err(error) => {
@@ -519,6 +551,7 @@ impl FvCaptureApp {
                 return;
             }
         };
+        let output_path = self.ensure_output_path();
 
         self.config.capture.selection = selection;
         self.config.encoder.fps = self.config.capture.fps;
@@ -542,6 +575,7 @@ impl FvCaptureApp {
             return;
         };
         self.status = StatusKey::Encoding;
+        self.activate_window_frames = 2;
         self.encoding_started_at = Some(Instant::now());
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -552,10 +586,16 @@ impl FvCaptureApp {
     }
 
     fn update_output_extension(&mut self) {
-        let path = PathBuf::from(self.output_path.trim());
+        let path = resolve_output_path(&self.output_path, self.config.encoder.format);
         let extension = self.config.encoder.format.extension();
         let updated = path.with_extension(extension);
         self.output_path = updated.display().to_string();
+    }
+
+    fn ensure_output_path(&mut self) -> PathBuf {
+        let path = resolve_output_path(&self.output_path, self.config.encoder.format);
+        self.output_path = path.display().to_string();
+        path
     }
 
     fn poll_project(&mut self) {
@@ -572,6 +612,7 @@ impl FvCaptureApp {
                 self.recording_preview = Some(RecordingPreviewState::new(project));
                 self.last_summary = None;
                 self.error = None;
+                self.active_tab = AppTab::Preview;
             }
             Err(error) => {
                 self.status = StatusKey::Ready;
@@ -582,7 +623,7 @@ impl FvCaptureApp {
 
     fn poll_encoding(&mut self) {
         let result = self.encoding_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        let Some((project, result)) = result else {
+        let Some(result) = result else {
             return;
         };
 
@@ -593,11 +634,12 @@ impl FvCaptureApp {
                 self.status = StatusKey::Saved;
                 self.last_summary = Some(summary);
                 self.error = None;
+                self.active_tab = AppTab::Preview;
             }
             Err(error) => {
                 self.status = StatusKey::PreviewReady;
-                self.recording_preview = Some(RecordingPreviewState::new(project));
                 self.error = Some(error);
+                self.active_tab = AppTab::Preview;
             }
         }
     }
@@ -691,6 +733,7 @@ impl FvCaptureApp {
     }
 
     fn sync_runtime_state(&mut self, ctx: &egui::Context) {
+        self.activate_window_if_requested(ctx);
         if self.active.is_some()
             || self.project_rx.is_some()
             || self.encoding_rx.is_some()
@@ -700,6 +743,26 @@ impl FvCaptureApp {
         }
         self.update_window_icon(ctx);
         self.save_settings_if_changed();
+    }
+
+    fn activate_window_if_requested(&mut self, ctx: &egui::Context) {
+        if self.activate_window_frames == 0 {
+            return;
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+        if self.activate_window_frames == 1 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+
+        self.activate_window_frames -= 1;
+        if self.activate_window_frames > 0 {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
     }
 }
 
@@ -794,23 +857,25 @@ impl FvCaptureApp {
         ui.separator();
         match self.active_tab {
             AppTab::Capture => self.source_ui(ui),
+            AppTab::Preview => self.recording_preview_ui(ui),
             AppTab::Overlay => self.overlay_ui(ui),
             AppTab::Appearance => self.app_appearance_ui(ui),
         }
         ui.add_space(8.0);
         ui.separator();
         self.action_ui(ui);
-        self.recording_preview_ui(ui);
     }
 }
 
 impl FvCaptureApp {
     fn tab_bar_ui(&mut self, ui: &mut egui::Ui) {
         let capture = self.tr(Text::CaptureTab);
+        let preview = self.tr(Text::Preview);
         let overlay = self.tr(Text::OverlayTab);
         let appearance = self.tr(Text::AppearanceTab);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.active_tab, AppTab::Capture, capture);
+            ui.selectable_value(&mut self.active_tab, AppTab::Preview, preview);
             ui.selectable_value(&mut self.active_tab, AppTab::Overlay, overlay);
             ui.selectable_value(&mut self.active_tab, AppTab::Appearance, appearance);
         });
@@ -1210,7 +1275,7 @@ impl FvCaptureApp {
     }
 
     fn choose_output_folder(&mut self) {
-        let current_path = PathBuf::from(self.output_path.trim());
+        let current_path = resolve_output_path(&self.output_path, self.config.encoder.format);
         let file_name = current_path
             .file_name()
             .map(|name| name.to_owned())
@@ -1223,10 +1288,10 @@ impl FvCaptureApp {
     }
 
     fn output_folder(&self) -> PathBuf {
-        let path = PathBuf::from(self.output_path.trim());
+        let path = resolve_output_path(&self.output_path, self.config.encoder.format);
         path.parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(default_output_folder)
     }
 
     fn open_output_folder(&self) -> Result<(), String> {
@@ -1489,6 +1554,8 @@ impl FvCaptureApp {
 
     fn recording_preview_ui(&mut self, ui: &mut egui::Ui) {
         if self.recording_preview.is_none() {
+            ui.heading(self.tr(Text::RecordingPreview));
+            ui.label(self.tr(Text::NoRecordingPreview));
             return;
         }
 
@@ -1509,8 +1576,6 @@ impl FvCaptureApp {
         let mut export_request = None;
         let mut load_error = None;
 
-        ui.add_space(8.0);
-        ui.separator();
         ui.heading(recording_preview);
         ui.label(output);
         self.output_settings_ui(ui);
@@ -1656,12 +1721,12 @@ impl FvCaptureApp {
         if self.encoding_rx.is_some() {
             return;
         }
-        let Some(preview) = self.recording_preview.take() else {
+        let Some(preview) = &self.recording_preview else {
             return;
         };
 
-        let project = preview.project;
-        let output_path = PathBuf::from(self.output_path.trim());
+        let project = preview.project.clone();
+        let output_path = self.ensure_output_path();
         let mut encoder = self.config.encoder.clone();
         encoder.fps = project.fps();
         self.status = StatusKey::Encoding;
@@ -1673,7 +1738,7 @@ impl FvCaptureApp {
             let result = project
                 .encode_range_with_config(start_frame, end_frame, &encoder, &output_path)
                 .map_err(|error| error.to_string());
-            let _ = tx.send((project, result));
+            let _ = tx.send(result);
         });
         self.encoding_rx = Some(rx);
     }
@@ -2121,9 +2186,10 @@ enum IconBadgeGlyph {
 fn draw_icon_badge(image: &mut RgbaImage, color: Rgba<u8>, glyph: IconBadgeGlyph) {
     let width = image.width() as i32;
     let height = image.height() as i32;
-    let radius = (width.min(height) as f32 * 0.18).round() as i32;
-    let center_x = width - radius - 14;
-    let center_y = height - radius - 14;
+    let radius = (width.min(height) as f32 * 0.24).round() as i32;
+    let inset = (width.min(height) as f32 * 0.05).round() as i32;
+    let center_x = width - radius - inset;
+    let center_y = height - radius - inset;
 
     for y in center_y - radius..=center_y + radius {
         for x in center_x - radius..=center_x + radius {
@@ -2162,6 +2228,74 @@ fn blend_icon_pixel(image: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>) {
     }
     image.put_pixel(x as u32, y as u32, color);
 }
+
+#[cfg(windows)]
+fn set_native_window_icon(native_window: NativeWindowHandle, icon: &egui::IconData) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateIconFromResourceEx, GetSystemMetrics, ICON_BIG, ICON_SMALL, ICON_SMALL2,
+        LR_DEFAULTCOLOR, SM_CXICON, SM_CXSMICON, SendMessageW, WM_SETICON,
+    };
+
+    let Some(hwnd) = native_window.hwnd else {
+        return;
+    };
+    let Some(unscaled_image) = RgbaImage::from_raw(icon.width, icon.height, icon.rgba.clone())
+    else {
+        return;
+    };
+    let hwnd = hwnd as HWND;
+
+    fn create_hicon(image: &RgbaImage, target_size: i32) -> Option<isize> {
+        let image = image::imageops::resize(
+            image,
+            target_size as u32,
+            target_size as u32,
+            image::imageops::Lanczos3,
+        );
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .ok()?;
+        let icon = unsafe {
+            CreateIconFromResourceEx(
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                1,
+                0x0003_0000,
+                target_size,
+                target_size,
+                LR_DEFAULTCOLOR,
+            )
+        };
+        if icon.is_null() {
+            None
+        } else {
+            Some(icon as isize)
+        }
+    }
+
+    let big_size = unsafe { GetSystemMetrics(SM_CXICON) };
+    if let Some(icon) = create_hicon(&unscaled_image, big_size) {
+        unsafe {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, icon);
+        }
+    }
+
+    let small_size = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    if let Some(icon) = create_hicon(&unscaled_image, small_size) {
+        unsafe {
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, icon);
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL2 as usize, icon);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_native_window_icon(_native_window: NativeWindowHandle, _icon: &egui::IconData) {}
 
 fn open_folder(folder: &Path) -> Result<(), String> {
     let mut command = if cfg!(windows) {
@@ -2276,8 +2410,48 @@ fn color_control(ui: &mut egui::Ui, label: &str, color: &mut OverlayColor) {
 }
 
 fn default_output_path(format: OutputFormat) -> PathBuf {
+    default_output_folder().join(default_output_file_name(format))
+}
+
+fn default_output_file_name(format: OutputFormat) -> String {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    PathBuf::from(format!("fvCapture-{stamp}.{}", format.extension()))
+    format!("fvCapture-{stamp}.{}", format.extension())
+}
+
+fn default_output_folder() -> PathBuf {
+    documents_dir()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn documents_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .map(|path| path.join("Documents"))
+    } else {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|path| path.join("Documents"))
+    }
+}
+
+fn resolve_output_path(path: &str, format: OutputFormat) -> PathBuf {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return default_output_path(format);
+    }
+
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        return path;
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_owned())
+        .unwrap_or_else(|| default_output_file_name(format).into());
+    default_output_folder().join(file_name)
 }
 
 fn settings_path() -> Option<PathBuf> {

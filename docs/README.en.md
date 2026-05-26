@@ -37,8 +37,8 @@ GUI:
 2. For area capture, use `Select on screen` and drag on the actual screen to select the capture region.
 3. In `Overlay`, adjust keyboard, mouse, cursor, label position, colors, and display duration.
 4. Use `Preview` to check the label appearance before recording. `Preview on screen` shows the labels over the actual screen.
-5. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to open the post-recording preview.
-6. In the post-recording preview, choose MP4 / GIF / WebM, size, and destination. Adjust the start/end handles and export only the selected range.
+5. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to open the post-recording preview in the `Preview` tab.
+6. In the post-recording preview, choose MP4 / GIF / WebM, size, and destination. The default destination is the Documents folder. Adjust the start/end handles and export only the selected range. After exporting, you can keep using the same preview to change the format or range and export again.
 7. While the app is running, F9 starts/stops recording and F10 pauses/resumes even when fvCapture is not active. You can enable a feedback sound for global shortcut actions in `Appearance`.
 8. If an update is found at startup, confirm the update dialog to install it.
 

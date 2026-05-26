@@ -39,9 +39,9 @@ pub struct RecordingSummary {
     pub duration_ms: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RecordingProject {
-    _temp: TempDir,
+    _temp: Arc<TempDir>,
     frame_dir: PathBuf,
     frame_count: usize,
     captured_frames: usize,
@@ -280,7 +280,7 @@ pub fn record_to_project_blocking(
     )?;
 
     Ok(RecordingProject {
-        _temp: temp,
+        _temp: Arc::new(temp),
         frame_dir: composed_dir,
         frame_count: encoded_frames,
         captured_frames: frames.len(),

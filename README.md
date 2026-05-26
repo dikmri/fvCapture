@@ -43,8 +43,8 @@ GUI:
 2. 範囲指定では `画面上で範囲選択` から実際の画面上をドラッグして録画範囲を選べます。
 3. `操作ラベル` でキーボード/マウス/カーソル表示、ラベル位置、色、表示時間を調整します。
 4. `プレビュー` でラベルの見た目を確認します。`画面上でプレビュー` では実際の画面上に重ねた状態を確認できます。
-5. `録画開始` で録画開始、`一時停止` / `再開`、`停止` で録画後プレビューを表示します。
-6. 録画後プレビューで MP4 / GIF / WebM、サイズ、保存先を選びます。プレビューでは再生範囲の先頭/末尾ハンドルを調整し、選択範囲だけを動画ファイルとして出力できます。
+5. `録画開始` で録画開始、`一時停止` / `再開`、`停止` で `プレビュー` タブに録画後プレビューを表示します。
+6. 録画後プレビューで MP4 / GIF / WebM、サイズ、保存先を選びます。保存先の既定値はドキュメントフォルダです。プレビューでは再生範囲の先頭/末尾ハンドルを調整し、選択範囲だけを動画ファイルとして出力できます。出力後も同じプレビューから形式や範囲を変えて再出力できます。
 7. アプリ起動中は、fvCapture が非アクティブでも F9 で録画開始/停止、F10 で一時停止/再開できます。`表示` からグローバルショートカット操作時の確認音も有効にできます。
 8. 起動時にアップデートが見つかった場合は、確認ダイアログから更新できます。
 
@@ -107,8 +107,8 @@ GUI:
 2. For area capture, use `Select on screen` and drag on the actual screen to select the capture region.
 3. In `Overlay`, adjust keyboard, mouse, cursor, label position, colors, and display duration.
 4. Use `Preview` to check the label appearance before recording. `Preview on screen` shows the labels over the actual screen.
-5. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to open the post-recording preview.
-6. In the post-recording preview, choose MP4 / GIF / WebM, size, and destination. Adjust the start/end handles and export only the selected range.
+5. Use `Start Recording`, `Pause` / `Resume`, and `Stop` to open the post-recording preview in the `Preview` tab.
+6. In the post-recording preview, choose MP4 / GIF / WebM, size, and destination. The default destination is the Documents folder. Adjust the start/end handles and export only the selected range. After exporting, you can keep using the same preview to change the format or range and export again.
 7. While the app is running, F9 starts/stops recording and F10 pauses/resumes even when fvCapture is not active. You can enable a feedback sound for global shortcut actions in `Appearance`.
 8. If an update is found at startup, confirm the update dialog to install it.
 
